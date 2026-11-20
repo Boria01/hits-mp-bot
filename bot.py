@@ -37,7 +37,7 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# Стартовые каналы по AliExpress, гаджетам, технике и Яндекс Маркету (без WB/Ozon)
+# Стартовые каналы по AliExpress, гаджетам, технике и Яндекс Маркету
 INITIAL_SEED_CHANNELS = [
     "ali_muzhik",
     "aliexpress_rus",
@@ -46,27 +46,28 @@ INITIAL_SEED_CHANNELS = [
     "ali_express_top",
     "top_gadgets_ali",
     "yandex_market_skidki",
+    "ali_pro",
+    "ali_hype",
+    "aligadgets",
+    "ali_skidki_top",
 ]
 
 IGNORED_USERNAMES = {
     "s", "joinchat", "share", "proxy", "iv", "addstickers", "setlanguage",
-    "botfather", "telegram", "durov", "username", "login", "contact", "vcnews",
+    "botfather", "telegram", "durov", "username", "login", "contact", "vcnews", "addlist",
 }
 
-# Слова-маркеры нужных нам каналов (AliExpress, Яндекс Маркет, гаджеты, инструменты, авто)
 CHANNEL_TOPIC_KEYWORDS = [
     "aliexpress", "алиэкспресс", "али", "яндекс маркет", "маркет",
     "гаджет", "техник", "электроник", "инструмент", "автотовар",
-    "находк", "распаковк", "кита", "скидк", "обзор",
+    "находк", "распаковк", "кита", "скидк", "обзор", "товар",
 ]
 
-# Стоп-слова для каналов и постов, завязанных только на WB / Ozon и женские образы
-WB_OZON_STOP_WORDS = [
+POST_STOP_WORDS = [
     "wildberries", "вайлдберриз", "артикул wb", "арт. wb", "арт wb",
-    "на вб", "с вб", "ozon", "озон", "артикул озон", "готовый образ", "лук на",
+    "на вб", "с вб", "артикул озон", "арт. озон", "готовый образ", "лук на",
 ]
 
-# Маркеры того, что пост описывает реальный товар
 POST_PRODUCT_KEYWORDS = [
     "цена", "руб", "₽", "скидк", "находк", "распаковк", "заказать",
     "купить", "aliexpress", "алиэкспресс", "яндекс", "маркет",
@@ -169,34 +170,28 @@ def get_working_gemini_client_and_models():
 
 
 def is_target_channel(channel_name: str, soup: BeautifulSoup) -> bool:
-    """Проверяет, что канал подходит по тематике и не является чисто WB/Ozon каналом."""
     ch_lower = channel_name.lower()
-    if "wb" in ch_lower or "ozon" in ch_lower or "wildberries" in ch_lower:
+    if "wb" in ch_lower or "wildberries" in ch_lower:
         return False
 
     title_el = soup.select_one(".tgme_channel_info_header_title")
     desc_el = soup.select_one(".tgme_channel_info_description")
-    header_text = ""
-    if title_el:
-        header_text += " " + title_el.get_text(" ", strip=True)
-    if desc_el:
-        header_text += " " + desc_el.get_text(" ", strip=True)
+    title_text = title_el.get_text(" ", strip=True).lower() if title_el else ""
+    desc_text = desc_el.get_text(" ", strip=True).lower() if desc_el else ""
 
-    header_lower = header_text.lower()
-    if any(sw in header_lower for sw in ["wildberries", "вайлдберриз", "ozon", "озон"]):
+    if "wildberries" in title_text or "вайлдберриз" in title_text:
         return False
 
-    return any(kw in header_lower for kw in CHANNEL_TOPIC_KEYWORDS)
+    full_header = f"{ch_lower} {title_text} {desc_text}"
+    return any(kw in full_header for kw in CHANNEL_TOPIC_KEYWORDS)
 
 
 def looks_like_target_post(text: str) -> bool:
-    """Быстрая локальная проверка в Python до AI: отсекает WB/Ozon, подборки шмоток и мусор."""
     t_lower = text.lower()
-    if len(t_lower) < 30 or len(t_lower) > 1800:
+    if len(t_lower) < 25 or len(t_lower) > 1800:
         return False
 
-    # Отсекаем посты с артикулами WB / Ozon и женскими луками
-    if any(sw in t_lower for sw in WB_OZON_STOP_WORDS):
+    if any(sw in t_lower for sw in POST_STOP_WORDS):
         return False
 
     has_keyword = any(kw in t_lower for kw in POST_PRODUCT_KEYWORDS)
@@ -220,7 +215,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
         soup = BeautifulSoup(resp.text, "html.parser")
 
         if not is_target_channel(channel, soup):
-            log(f"Канал @{channel} не подходит (WB/Ozon или не товарный), удаляю из пула.")
+            log(f"Канал @{channel} не по теме товаров/гаджетов, удаляю из пула.")
             if channel in channels_pool:
                 channels_pool.remove(channel)
             return []
@@ -230,7 +225,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
             d_l = d_ch.lower()
             if d_l in IGNORED_USERNAMES or d_l == own_channel or d_l.endswith("bot"):
                 continue
-            if "wb" in d_l or "ozon" in d_l or "wildberries" in d_l:
+            if "wb" in d_l or "wildberries" in d_l:
                 continue
             if d_l not in [c.lower() for c in channels_pool]:
                 channels_pool.append(d_ch)
@@ -299,8 +294,8 @@ def generate_post_content(client, working_models: list, raw_text: str) -> dict:
 Требования:
 1. Верни строго JSON: {{"is_product": false}}, если это:
    - НЕ физический товар (реклама канала, бота, казино, ставок, курсов, кредитов, подписки);
-   - подборка/коллаж из нескольких разных вещей одежды (женский образ/лук с WB/Ozon);
-   - товар, привязанный строго к Wildberries или Ozon.
+   - подборка/коллаж из нескольких разных вещей одежды (женский образ/лук);
+   - товар, привязанный строго к Wildberries.
 2. Если это ОДИН конкретный крутой товар (гаджет, электроника, инструмент, автотовар, полезная вещь для дома/кухни), верни строго JSON без markdown-обёртки:
 {{
   "is_product": true,
@@ -355,12 +350,13 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
         client, refreshed = get_working_gemini_client_and_models()
         working_models.extend(refreshed)
 
-    if not channels_pool:
-        channels_pool.extend(INITIAL_SEED_CHANNELS)
+    for seed in INITIAL_SEED_CHANNELS:
+        if seed not in channels_pool:
+            channels_pool.append(seed)
 
-    sample_size = min(5, len(channels_pool))
+    sample_size = min(6, len(channels_pool))
     selected_channels = random.sample(channels_pool, sample_size)
-    log(f"Проверяю каналы (AliExpress / Маркет / Гаджеты): {selected_channels}")
+    log(f"Проверяю каналы: {selected_channels}")
 
     video_posts = []
     photo_posts = []
@@ -375,9 +371,8 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
             else:
                 photo_posts.append(p)
 
-    # Приоритет на живые видео-обзоры, фото — запасной вариант
     candidates = video_posts + photo_posts
-    log(f"Кандидатов после фильтра WB/Ozon: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
+    log(f"Кандидатов после фильтра: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
 
     for item in candidates:
         if item["id"] in history:
@@ -393,7 +388,7 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
             continue
 
         if not ai_data.get("is_product"):
-            log(f"Пост {item['id']} отсеян AI (не одиночный товар / WB-Ozon / реклама).")
+            log(f"Пост {item['id']} отсеян AI (не одиночный товар / WB / реклама).")
             history.append(item["id"])
             continue
 
@@ -441,7 +436,7 @@ def main():
     channels_pool = load_json_list(CHANNELS_POOL_FILE, INITIAL_SEED_CHANNELS)
 
     client, working_models = get_working_gemini_client_and_models()
-    log(f"Старт цикла 5.5 ч. Рабочие модели: {working_models}. Интервал: {POST_INTERVAL_MINUTES} мин.")
+    log(f"Старт цикла 5.5 ч. Рабочие модели: {working_models}. Интервал после публикации: {POST_INTERVAL_MINUTES} мин.")
 
     while True:
         elapsed = time.time() - start_time
@@ -451,22 +446,21 @@ def main():
 
         published = run_single_post_cycle(client, working_models, history, channels_pool)
 
-        if published:
-            wait_seconds = POST_INTERVAL_MINUTES * 60
-        else:
-            log("Подходящих постов не нашлось, повтор через 5 минут.")
-            wait_seconds = 5 * 60
+        if not published:
+            log("Подходящих постов в этой пачке не нашлось — сразу ищу дальше (пауза 10 сек)...")
+            time.sleep(10)
+            continue
 
         remaining = MAX_RUNTIME_SECONDS - (time.time() - start_time)
         if remaining <= 60:
             log("Время сессии истекает, выхожу для передачи эстафеты.")
             break
 
-        sleep_duration = min(wait_seconds, remaining)
-        log(f"Сплю {int(sleep_duration // 60)} мин. до следующей проверки...")
+        sleep_duration = min(POST_INTERVAL_MINUTES * 60, remaining)
+        log(f"Пост опубликован! Сплю {int(sleep_duration // 60)} мин. до следующей публикации...")
         time.sleep(sleep_duration)
 
 
 if __name__ == "__main__":
     main()
-                
+                      
