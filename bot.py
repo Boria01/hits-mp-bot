@@ -36,7 +36,6 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# Стартовые точки входа в открытую сеть Telegram (из них бот сам раскручивает десятки новых каналов по репостам)
 INITIAL_SEED_CHANNELS = [
     "ali_muzhik",
     "nahodki_wb_ozon",
@@ -89,8 +88,8 @@ def save_and_push_state(history: list, channels_pool: list):
         log(f"Ошибка git push: {e}")
 
 
-def get_working_gemini_client_and_model():
-    """Динамически получает список моделей из API и проверяет каждую на работоспособность."""
+def get_working_gemini_client_and_models():
+    """Возвращает клиент и отсортированный список всех живых текстовых моделей (Gemini + Gemma)."""
     client = genai.Client(api_key=GEMINI_API_KEY)
     raw_models = list(client.models.list())
     candidates = []
@@ -102,7 +101,7 @@ def get_working_gemini_client_and_model():
         clean_name = name.replace("models/", "")
         lower_name = clean_name.lower()
 
-        if "gemini" not in lower_name:
+        if not ("gemini" in lower_name or "gemma-3" in lower_name):
             continue
         if any(bad in lower_name for bad in ["embedding", "imagen", "veo", "tts", "audio", "aqa", "image", "computer-use"]):
             continue
@@ -114,11 +113,12 @@ def get_working_gemini_client_and_model():
         candidates.append(clean_name)
 
     if not candidates:
-        raise RuntimeError("API не вернул ни одной текстовой модели Gemini для этого ключа.")
+        raise RuntimeError("API не вернул ни одной текстовой модели для этого ключа.")
 
-    candidates.sort(key=lambda x: (0 if "flash" in x.lower() else 1, x))
+    candidates.sort(key=lambda x: (0 if "flash" in x.lower() else (1 if "gemini" in x.lower() else 2), x))
     log(f"Кандидаты моделей из API: {candidates}")
 
+    working = []
     for model_name in candidates:
         try:
             resp = client.models.generate_content(
@@ -126,17 +126,19 @@ def get_working_gemini_client_and_model():
                 contents="Ответь одним словом: ОК"
             )
             if resp and resp.text:
-                log(f"Выбрана рабочая модель Gemini: {model_name}")
-                return client, model_name
+                log(f"Проверена рабочая модель: {model_name}")
+                working.append(model_name)
         except Exception as e:
-            log(f"Модель {model_name} недоступна, пробую следующую... ({str(e)[:100]})")
+            log(f"Модель {model_name} недоступна при проверке ({str(e)[:90]})")
             continue
 
-    raise RuntimeError("Ни одна из возвращённых API моделей не ответила на тестовый запрос.")
+    if not working:
+        raise RuntimeError("Ни одна из возвращённых API моделей сейчас не доступна (возможно, исчерпаны квоты по всем моделям ключа).")
+
+    return client, working
 
 
 def discover_from_open_web(channels_pool: list):
-    """Дополнительно ищет новые каналы через открытые подборки на telegra.ph и vc.ru."""
     own_channel = CHANNEL_ID.lstrip("@").lower()
     open_pages = [
         "https://vc.ru/tag/aliexpress",
@@ -164,11 +166,6 @@ def discover_from_open_web(channels_pool: list):
 
 
 def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> list:
-    """
-    Читает открытую веб-ленту t.me/s/<channel>:
-    1) Собирает посты с видео или фото товаров.
-    2) Вытаскивает из репостов и упоминаний новые каналы и пополняет channels_pool.
-    """
     url = f"https://t.me/s/{channel}"
     own_channel = CHANNEL_ID.lstrip("@").lower()
     results = []
@@ -179,7 +176,6 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
         if resp.status_code != 200:
             return []
 
-        # Ищем упоминания и репосты других открытых каналов внутри страницы
         discovered = re.findall(r"t\.me/(?:s/)?([a-zA-Z0-9_]{5,32})", resp.text)
         new_found = 0
         for d_ch in discovered:
@@ -209,7 +205,6 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
             if len(raw_text) < 25:
                 continue
 
-            # Приоритет 1: пост с видео
             video_tag = msg.select_one("video.tgme_widget_message_video")
             if video_tag and video_tag.get("src"):
                 results.append({
@@ -220,7 +215,6 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
                 })
                 continue
 
-            # Приоритет 2: пост с качественным фото товара (если видео в канале мало)
             photo_wrap = msg.select_one("a.tgme_widget_message_photo_wrap")
             if photo_wrap and photo_wrap.get("style"):
                 bg_match = re.search(r"url\(['\"]?(https?://[^'\")]+)['\"]?\)", photo_wrap["style"])
@@ -246,7 +240,8 @@ def clean_donor_text(text: str) -> str:
     return text.strip()
 
 
-def generate_post_content(client, model_name: str, raw_text: str) -> dict:
+def generate_post_content(client, working_models: list, raw_text: str) -> dict:
+    """Пробует сгенерировать пост через список живых моделей; если у текущей кончилась квота 429 — переключается на следующую."""
     cleaned = clean_donor_text(raw_text)
     prompt = f"""
 Ты — автор популярного Telegram-канала «Лучшие находки с маркетплейсов».
@@ -265,10 +260,23 @@ def generate_post_content(client, model_name: str, raw_text: str) -> dict:
   "search_query": "Точное название товара для поиска на маркетплейсе (4-7 слов)"
 }}
 """
-    response = client.models.generate_content(model=model_name, contents=prompt)
-    raw_resp = response.text.strip()
-    raw_resp = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_resp, flags=re.DOTALL).strip()
-    return json.loads(raw_resp)
+    last_err = None
+    for model_name in list(working_models):
+        try:
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            raw_resp = response.text.strip()
+            raw_resp = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_resp, flags=re.DOTALL).strip()
+            return json.loads(raw_resp)
+        except Exception as e:
+            err_str = str(e)
+            last_err = e
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                log(f"У модели {model_name} исчерпан лимит 429, переключаюсь на следующую модель...")
+                working_models.remove(model_name)
+                continue
+            raise e
+
+    raise RuntimeError(f"Все доступные модели исчерпали лимит или вернули ошибку: {last_err}")
 
 
 def send_media_to_telegram(media_type: str, media_path: str, caption: str):
@@ -293,10 +301,13 @@ def send_media_to_telegram(media_type: str, media_path: str, caption: str):
             raise RuntimeError(f"Ошибка Telegram API: {res_json}")
 
 
-def run_single_post_cycle(client, model_name: str, history: list, channels_pool: list) -> bool:
+def run_single_post_cycle(client, working_models: list, history: list, channels_pool: list) -> bool:
+    if not working_models:
+        client, refreshed = get_working_gemini_client_and_models()
+        working_models.extend(refreshed)
+
     discover_from_open_web(channels_pool)
 
-    # Выбираем 6 случайных каналов из нашего растущего пула
     sample_size = min(6, len(channels_pool))
     selected_channels = random.sample(channels_pool, sample_size)
     log(f"Выбраны каналы для обхода в этом цикле: {selected_channels}")
@@ -314,7 +325,6 @@ def run_single_post_cycle(client, model_name: str, history: list, channels_pool:
             else:
                 photo_posts.append(p)
 
-    # Сначала ставим видео-обзоры, затем фото-находки
     candidates = video_posts + photo_posts
     log(f"Всего свежих кандидатов для проверки: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
 
@@ -322,11 +332,13 @@ def run_single_post_cycle(client, model_name: str, history: list, channels_pool:
         if item["id"] in history:
             continue
 
-        log(f"Отправляю в Gemini пост {item['id']} ({item['type']})...")
+        log(f"Отправляю в AI пост {item['id']} ({item['type']}) через {working_models[0]}...")
         try:
-            ai_data = generate_post_content(client, model_name, item["raw_text"])
+            ai_data = generate_post_content(client, working_models, item["raw_text"])
         except Exception as e:
-            log(f"Ошибка Gemini для {item['id']}: {e}")
+            log(f"Ошибка AI для {item['id']}: {e}")
+            if not working_models:
+                break
             continue
 
         if not ai_data.get("is_product"):
@@ -378,8 +390,8 @@ def main():
     history = load_json_list(HISTORY_FILE, [])
     channels_pool = load_json_list(CHANNELS_POOL_FILE, INITIAL_SEED_CHANNELS)
 
-    client, model_name = get_working_gemini_client_and_model()
-    log(f"Старт цикла 5.5 ч. Интервал: {POST_INTERVAL_MINUTES} мин. Каналов в базе: {len(channels_pool)}")
+    client, working_models = get_working_gemini_client_and_models()
+    log(f"Старт цикла 5.5 ч. Доступные модели: {working_models}. Интервал: {POST_INTERVAL_MINUTES} мин.")
 
     while True:
         elapsed = time.time() - start_time
@@ -387,13 +399,13 @@ def main():
             log("Прошло 5.5 часов. Завершаю сессию для автоматического перезапуска.")
             break
 
-        published = run_single_post_cycle(client, model_name, history, channels_pool)
+        published = run_single_post_cycle(client, working_models, history, channels_pool)
 
         if published:
             wait_seconds = POST_INTERVAL_MINUTES * 60
         else:
-            log("Подходящих новых постов не нашлось, следующая попытка через 5 минут.")
-            wait_seconds = 5 * 60
+            log("Подходящих новых постов не нашлось или лимит моделей исчерпан, следующая попытка через 10 минут.")
+            wait_seconds = 10 * 60
 
         remaining = MAX_RUNTIME_SECONDS - (time.time() - start_time)
         if remaining <= 60:
