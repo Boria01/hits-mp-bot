@@ -3,7 +3,6 @@ name: AutoPost Hits MP
 on:
   workflow_dispatch:
   schedule:
-    # Резервный будильник раз в 6 часов на случай сбоя сети
     - cron: '15 */6 * * *'
 
 permissions:
@@ -38,9 +37,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           PARTNER_SEARCH_TEMPLATE: ${{ secrets.PARTNER_SEARCH_TEMPLATE }}
-          POST_INTERVAL_MINUTES: "180"
+          POST_INTERVAL_MINUTES: "120"
         run: |
-          python bot.py
+          python -u bot.py
 
       - name: Trigger next 5.5h cycle
         if: always()
