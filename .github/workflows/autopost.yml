@@ -1,17 +1,23 @@
 name: AutoPost Hits MP
 
 on:
+  workflow_dispatch:
   schedule:
-    # Запуск каждые 3 часа с 06:00 до 21:00 по UTC (09:00 - 00:00 по МСК)
-    - cron: '0 6,9,12,15,18,21 * * *'
-  workflow_dispatch: # Кнопка ручного запуска для проверки
+    # Резервный будильник раз в 6 часов на случай сбоя сети
+    - cron: '15 */6 * * *'
 
 permissions:
   contents: write
+  actions: write
+
+concurrency:
+  group: hits-mp-autopost-loop
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repository
@@ -26,20 +32,24 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run bot script
+      - name: Run bot loop (5.5 hours)
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          DONOR_CHANNELS: ${{ secrets.DONOR_CHANNELS }}
           PARTNER_SEARCH_TEMPLATE: ${{ secrets.PARTNER_SEARCH_TEMPLATE }}
+          POST_INTERVAL_MINUTES: "180"
         run: |
           python bot.py
 
-      - name: Commit updated history.json
+      - name: Trigger next 5.5h cycle
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add history.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update post history" && git push)
-          
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/autopost.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'
+            
