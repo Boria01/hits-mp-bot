@@ -13,7 +13,7 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID", "@hits_mp")
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 # Список публичных каналов-доноров (через запятую в Secrets или по умолчанию)
-DONORS_RAW = os.environ.get("DONOR_CHANNELS", "ali_muzhik,nahodki_wb_ozon")
+DONORS_RAW = os.environ.get("DONOR_CHANNELS", "")
 DONOR_CHANNELS = [c.strip().lstrip("@") for c in DONORS_RAW.split(",") if c.strip()]
 
 # Шаблон твоей партнёрской ссылки (когда одобрят ePN или Яндекс Дистрибуцию).
