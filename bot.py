@@ -16,7 +16,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@hits_mp")
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
-# Шаблон твоей партнёрской ссылки (добавишь после модерации ePN / Яндекс Дистрибуции)
+# Шаблон твоей партнёрской ссылки (ePN AliExpress или Яндекс Дистрибуция)
 PARTNER_SEARCH_TEMPLATE = os.environ.get("PARTNER_SEARCH_TEMPLATE", "").strip()
 
 # Интервал между постами в минутах (120 = каждые 2 часа, 180 = каждые 3 часа)
@@ -37,15 +37,15 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# Стартовые товарные каналы-агрегаторы (от них бот по репостам находит другие товарные каналы)
+# Стартовые каналы по AliExpress, гаджетам, технике и Яндекс Маркету (без WB/Ozon)
 INITIAL_SEED_CHANNELS = [
     "ali_muzhik",
-    "nahodki_wb_ozon",
-    "top_nahodki_mp",
     "aliexpress_rus",
-    "wb_ozon_nahodki",
     "nahodki_aliexpress",
-    "skidki_nahodki_mp",
+    "kitaec_ru",
+    "ali_express_top",
+    "top_gadgets_ali",
+    "yandex_market_skidki",
 ]
 
 IGNORED_USERNAMES = {
@@ -53,18 +53,24 @@ IGNORED_USERNAMES = {
     "botfather", "telegram", "durov", "username", "login", "contact", "vcnews",
 }
 
-# Маркеры тематики канала (проверяются по названию и описанию канала без траты AI)
+# Слова-маркеры нужных нам каналов (AliExpress, Яндекс Маркет, гаджеты, инструменты, авто)
 CHANNEL_TOPIC_KEYWORDS = [
-    "находк", "маркетплейс", "wildberries", "вайлдберриз", "wb", "вб",
-    "ozon", "озон", "aliexpress", "алиэкспресс", "али", "яндекс маркет",
-    "распаковк", "гаджет", "товар", "скидк", "обзор", "покупк", "вещи",
+    "aliexpress", "алиэкспресс", "али", "яндекс маркет", "маркет",
+    "гаджет", "техник", "электроник", "инструмент", "автотовар",
+    "находк", "распаковк", "кита", "скидк", "обзор",
 ]
 
-# Маркеры того, что конкретный пост — именно про товар (проверяются до обращения к AI)
+# Стоп-слова для каналов и постов, завязанных только на WB / Ozon и женские образы
+WB_OZON_STOP_WORDS = [
+    "wildberries", "вайлдберриз", "артикул wb", "арт. wb", "арт wb",
+    "на вб", "с вб", "ozon", "озон", "артикул озон", "готовый образ", "лук на",
+]
+
+# Маркеры того, что пост описывает реальный товар
 POST_PRODUCT_KEYWORDS = [
-    "арт", "артикул", "цена", "руб", "₽", "скидк", "находк", "распаковк",
-    "заказать", "купить", "ссылк", "wildberries", "wb", "вб", "ozon", "озон",
-    "aliexpress", "алиэкспресс", "маркет", "обзор", "покупк", "доставк",
+    "цена", "руб", "₽", "скидк", "находк", "распаковк", "заказать",
+    "купить", "aliexpress", "алиэкспресс", "яндекс", "маркет",
+    "обзор", "гаджет", "устройств", "аккумулятор", "мощност", "usb",
 ]
 
 
@@ -102,7 +108,7 @@ def save_and_push_state(history: list, channels_pool: list):
             subprocess.run(["git", "commit", "-m", "Update bot state"], check=False)
             subprocess.run(["git", "pull", "--rebase", "-X", "ours"], check=False)
             subprocess.run(["git", "push"], check=False)
-            log(f"Состояние сохранено (история: {len(history)}, товарных каналов в базе: {len(channels_pool)}).")
+            log(f"Состояние сохранено (история: {len(history)}, каналов в базе: {len(channels_pool)}).")
     except Exception as e:
         log(f"Ошибка синхронизации с GitHub: {e}")
 
@@ -162,8 +168,12 @@ def get_working_gemini_client_and_models():
     return client, working
 
 
-def is_product_channel(soup: BeautifulSoup) -> bool:
-    """Проверяет по названию и описанию канала, что он посвящён товарам/находкам (без траты AI)."""
+def is_target_channel(channel_name: str, soup: BeautifulSoup) -> bool:
+    """Проверяет, что канал подходит по тематике и не является чисто WB/Ozon каналом."""
+    ch_lower = channel_name.lower()
+    if "wb" in ch_lower or "ozon" in ch_lower or "wildberries" in ch_lower:
+        return False
+
     title_el = soup.select_one(".tgme_channel_info_header_title")
     desc_el = soup.select_one(".tgme_channel_info_description")
     header_text = ""
@@ -173,15 +183,22 @@ def is_product_channel(soup: BeautifulSoup) -> bool:
         header_text += " " + desc_el.get_text(" ", strip=True)
 
     header_lower = header_text.lower()
+    if any(sw in header_lower for sw in ["wildberries", "вайлдберриз", "ozon", "озон"]):
+        return False
+
     return any(kw in header_lower for kw in CHANNEL_TOPIC_KEYWORDS)
 
 
-def looks_like_product_post(text: str) -> bool:
-    """Быстрая локальная проверка в Python перед отправкой в AI: есть ли в посте признаки товара."""
+def looks_like_target_post(text: str) -> bool:
+    """Быстрая локальная проверка в Python до AI: отсекает WB/Ozon, подборки шмоток и мусор."""
     t_lower = text.lower()
     if len(t_lower) < 30 or len(t_lower) > 1800:
         return False
-    # Должно быть хотя бы 1 товарное слово или цена/артикул
+
+    # Отсекаем посты с артикулами WB / Ozon и женскими луками
+    if any(sw in t_lower for sw in WB_OZON_STOP_WORDS):
+        return False
+
     has_keyword = any(kw in t_lower for kw in POST_PRODUCT_KEYWORDS)
     has_digits = bool(re.search(r"\d{2,}", t_lower))
     return has_keyword and has_digits
@@ -202,18 +219,18 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Проверяем, что канал реально про товары, а не новостной мусор вроде vcnews
-        if not is_product_channel(soup):
-            log(f"Канал @{channel} не по теме товаров, удаляю из пула.")
+        if not is_target_channel(channel, soup):
+            log(f"Канал @{channel} не подходит (WB/Ozon или не товарный), удаляю из пула.")
             if channel in channels_pool:
                 channels_pool.remove(channel)
             return []
 
-        # Собираем новые ссылки на другие каналы из репостов
         discovered = re.findall(r"t\.me/(?:s/)?([a-zA-Z0-9_]{5,32})", resp.text)
         for d_ch in discovered:
             d_l = d_ch.lower()
             if d_l in IGNORED_USERNAMES or d_l == own_channel or d_l.endswith("bot"):
+                continue
+            if "wb" in d_l or "ozon" in d_l or "wildberries" in d_l:
                 continue
             if d_l not in [c.lower() for c in channels_pool]:
                 channels_pool.append(d_ch)
@@ -230,8 +247,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
             text_div = msg.select_one(".tgme_widget_message_text")
             raw_text = text_div.get_text("\n").strip() if text_div else ""
 
-            # Жёсткий предфильтр ДО обращения к Gemini
-            if not looks_like_product_post(raw_text):
+            if not looks_like_target_post(raw_text):
                 continue
 
             video_tag = msg.select_one("video.tgme_widget_message_video")
@@ -255,7 +271,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
                         "raw_text": raw_text
                     })
 
-        log(f"@{channel}: отобрано товарных постов после локального фильтра: {len(results)}")
+        log(f"@{channel}: отобрано целевых постов: {len(results)}")
     except Exception as e:
         log(f"Ошибка чтения @{channel}: {e}")
 
@@ -272,21 +288,25 @@ def clean_donor_text(text: str) -> str:
 
 def generate_post_content(client, working_models: list, raw_text: str) -> dict:
     cleaned = clean_donor_text(raw_text)
+    current_date = datetime.now(MSK_TZ).strftime("%d.%m.%Y")
     prompt = f"""
-Ты — автор популярного Telegram-канала «Лучшие находки с маркетплейсов».
-На основе исходного текста составь описание товара для поста.
+Ты — автор популярного Telegram-канала «Лучшие находки с маркетплейсов» (упор на AliExpress и Яндекс Маркет).
+Сегодняшняя дата: {current_date} (учитывай текущий сезон, не пиши про весну/лето, если сейчас осень/зима).
 
 Исходный текст:
 \"\"\"{cleaned}\"\"\"
 
 Требования:
-1. Если это НЕ конкретный физический товар (а реклама канала, бота, казино, ставок, курсов, кредитов), верни строго JSON: {{"is_product": false}}
-2. Если это конкретный физический товар, верни строго JSON без markdown-обёртки:
+1. Верни строго JSON: {{"is_product": false}}, если это:
+   - НЕ физический товар (реклама канала, бота, казино, ставок, курсов, кредитов, подписки);
+   - подборка/коллаж из нескольких разных вещей одежды (женский образ/лук с WB/Ozon);
+   - товар, привязанный строго к Wildberries или Ozon.
+2. Если это ОДИН конкретный крутой товар (гаджет, электроника, инструмент, автотовар, полезная вещь для дома/кухни), верни строго JSON без markdown-обёртки:
 {{
   "is_product": true,
   "title": "Короткий цепляющий заголовок с 1 подходящим эмодзи в начале",
-  "description": "Живое описание пользы товара (2-3 предложения) + 3-4 коротких буллита (• ...) с главными фишками. Без воды, без чужих каналов, без ссылок и без erid.",
-  "search_query": "Точное название товара для поиска на маркетплейсе (4-7 слов)"
+  "description": "Живое описание пользы товара (2-3 предложения) + 3-4 коротких буллита (• ...) с главными фишками. Без воды, без упоминаний WB/Ozon, без чужих каналов, ссылок и erid.",
+  "search_query": "Точное название товара для поиска на AliExpress и Яндекс Маркете (4-7 слов)"
 }}
 """
     last_err = None
@@ -340,7 +360,7 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
 
     sample_size = min(5, len(channels_pool))
     selected_channels = random.sample(channels_pool, sample_size)
-    log(f"Проверяю товарные каналы: {selected_channels}")
+    log(f"Проверяю каналы (AliExpress / Маркет / Гаджеты): {selected_channels}")
 
     video_posts = []
     photo_posts = []
@@ -355,8 +375,9 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
             else:
                 photo_posts.append(p)
 
+    # Приоритет на живые видео-обзоры, фото — запасной вариант
     candidates = video_posts + photo_posts
-    log(f"Кандидатов после локального отбора: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
+    log(f"Кандидатов после фильтра WB/Ozon: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
 
     for item in candidates:
         if item["id"] in history:
@@ -372,7 +393,7 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
             continue
 
         if not ai_data.get("is_product"):
-            log(f"Пост {item['id']} отсеян AI (не товар).")
+            log(f"Пост {item['id']} отсеян AI (не одиночный товар / WB-Ozon / реклама).")
             history.append(item["id"])
             continue
 
@@ -448,4 +469,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                       
+                
