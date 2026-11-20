@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 from google import genai
+from google.genai import types
 
 # --- НАСТРОЙКИ ИЗ GITHUB SECRETS ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -89,8 +90,11 @@ def save_and_push_state(history: list, channels_pool: list):
 
 
 def get_working_gemini_client_and_models():
-    """Возвращает клиент и отсортированный список всех живых текстовых моделей (Gemini + Gemma)."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    """Находит первые 2 рабочие текстовые модели без зависаний и долгих ретраев."""
+    client = genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(timeout=15000)
+    )
     raw_models = list(client.models.list())
     candidates = []
 
@@ -116,7 +120,7 @@ def get_working_gemini_client_and_models():
         raise RuntimeError("API не вернул ни одной текстовой модели для этого ключа.")
 
     candidates.sort(key=lambda x: (0 if "flash" in x.lower() else (1 if "gemini" in x.lower() else 2), x))
-    log(f"Кандидаты моделей из API: {candidates}")
+    log(f"Найдено кандидатов моделей: {len(candidates)}")
 
     working = []
     for model_name in candidates:
@@ -126,14 +130,16 @@ def get_working_gemini_client_and_models():
                 contents="Ответь одним словом: ОК"
             )
             if resp and resp.text:
-                log(f"Проверена рабочая модель: {model_name}")
+                log(f"Рабочая модель найдена: {model_name}")
                 working.append(model_name)
+                if len(working) >= 2:
+                    break
         except Exception as e:
-            log(f"Модель {model_name} недоступна при проверке ({str(e)[:90]})")
+            log(f"Пропускаю {model_name}: {str(e)[:80]}")
             continue
 
     if not working:
-        raise RuntimeError("Ни одна из возвращённых API моделей сейчас не доступна (возможно, исчерпаны квоты по всем моделям ключа).")
+        raise RuntimeError("Ни одна модель не ответила (исчерпаны лимиты по всем моделям ключа).")
 
     return client, working
 
@@ -171,7 +177,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
     results = []
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp = requests.get(url, headers=HEADERS, timeout=15)
         log(f"Проверка @{channel} -> HTTP {resp.status_code}")
         if resp.status_code != 200:
             return []
@@ -186,11 +192,11 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
                 channels_pool.append(d_ch)
                 new_found += 1
         if new_found > 0:
-            log(f"Из ленты @{channel} обнаружено новых каналов в пул: +{new_found} (всего в пуле: {len(channels_pool)})")
+            log(f"Из @{channel} добавлено каналов в пул: +{new_found} (всего: {len(channels_pool)})")
 
         soup = BeautifulSoup(resp.text, "html.parser")
         messages = soup.select(".tgme_widget_message_wrap")
-        log(f"Найдено сообщений на странице @{channel}: {len(messages)}")
+        log(f"Сообщений на странице @{channel}: {len(messages)}")
 
         for msg in messages:
             msg_div = msg.select_one(".tgme_widget_message")
@@ -227,7 +233,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
                     })
 
     except Exception as e:
-        log(f"Ошибка при чтении @{channel}: {e}")
+        log(f"Ошибка чтения @{channel}: {e}")
 
     return results
 
@@ -241,7 +247,6 @@ def clean_donor_text(text: str) -> str:
 
 
 def generate_post_content(client, working_models: list, raw_text: str) -> dict:
-    """Пробует сгенерировать пост через список живых моделей; если у текущей кончилась квота 429 — переключается на следующую."""
     cleaned = clean_donor_text(raw_text)
     prompt = f"""
 Ты — автор популярного Telegram-канала «Лучшие находки с маркетплейсов».
@@ -270,13 +275,13 @@ def generate_post_content(client, working_models: list, raw_text: str) -> dict:
         except Exception as e:
             err_str = str(e)
             last_err = e
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                log(f"У модели {model_name} исчерпан лимит 429, переключаюсь на следующую модель...")
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str:
+                log(f"Модель {model_name} недоступна (429/503), переключаюсь на следующую...")
                 working_models.remove(model_name)
                 continue
             raise e
 
-    raise RuntimeError(f"Все доступные модели исчерпали лимит или вернули ошибку: {last_err}")
+    raise RuntimeError(f"Все доступные модели вернули ошибку: {last_err}")
 
 
 def send_media_to_telegram(media_type: str, media_path: str, caption: str):
@@ -310,7 +315,7 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
 
     sample_size = min(6, len(channels_pool))
     selected_channels = random.sample(channels_pool, sample_size)
-    log(f"Выбраны каналы для обхода в этом цикле: {selected_channels}")
+    log(f"Каналы для обхода: {selected_channels}")
 
     video_posts = []
     photo_posts = []
@@ -326,13 +331,13 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
                 photo_posts.append(p)
 
     candidates = video_posts + photo_posts
-    log(f"Всего свежих кандидатов для проверки: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
+    log(f"Свежих кандидатов: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
 
     for item in candidates:
         if item["id"] in history:
             continue
 
-        log(f"Отправляю в AI пост {item['id']} ({item['type']}) через {working_models[0]}...")
+        log(f"Обработка {item['id']} ({item['type']}) через {working_models[0]}...")
         try:
             ai_data = generate_post_content(client, working_models, item["raw_text"])
         except Exception as e:
@@ -370,7 +375,7 @@ def run_single_post_cycle(client, working_models: list, history: list, channels_
                 f.write(m_resp.content)
 
             send_media_to_telegram(item["type"], temp_file, caption)
-            log(f"УСПЕШНО ОПУБЛИКОВАНО В КАНАЛ: {item['id']} -> {title}")
+            log(f"ОПУБЛИКОВАНО: {item['id']} -> {title}")
 
             history.append(item["id"])
             save_and_push_state(history, channels_pool)
@@ -391,12 +396,12 @@ def main():
     channels_pool = load_json_list(CHANNELS_POOL_FILE, INITIAL_SEED_CHANNELS)
 
     client, working_models = get_working_gemini_client_and_models()
-    log(f"Старт цикла 5.5 ч. Доступные модели: {working_models}. Интервал: {POST_INTERVAL_MINUTES} мин.")
+    log(f"Старт цикла 5.5 ч. Рабочие модели: {working_models}. Интервал: {POST_INTERVAL_MINUTES} мин.")
 
     while True:
         elapsed = time.time() - start_time
         if elapsed >= MAX_RUNTIME_SECONDS:
-            log("Прошло 5.5 часов. Завершаю сессию для автоматического перезапуска.")
+            log("Прошло 5.5 часов. Завершаю сессию для перезапуска.")
             break
 
         published = run_single_post_cycle(client, working_models, history, channels_pool)
@@ -404,8 +409,8 @@ def main():
         if published:
             wait_seconds = POST_INTERVAL_MINUTES * 60
         else:
-            log("Подходящих новых постов не нашлось или лимит моделей исчерпан, следующая попытка через 10 минут.")
-            wait_seconds = 10 * 60
+            log("Подходящих постов не нашлось, повтор через 5 минут.")
+            wait_seconds = 5 * 60
 
         remaining = MAX_RUNTIME_SECONDS - (time.time() - start_time)
         if remaining <= 60:
@@ -419,4 +424,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
