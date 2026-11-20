@@ -60,6 +60,11 @@ OUT_OF_STOCK_PHRASES = [
 ]
 
 
+def log(msg: str):
+    now_str = datetime.now(MSK_TZ).strftime("%H:%M:%S")
+    print(f"[{now_str} МСК] {msg}", flush=True)
+
+
 def load_history() -> list:
     if os.path.exists(HISTORY_FILE):
         try:
@@ -83,9 +88,9 @@ def save_and_push_history(history: list):
         if diff.returncode != 0:
             subprocess.run(["git", "commit", "-m", "Update post history"], check=False)
             subprocess.run(["git", "push"], check=False)
-            print("История успешно сохранена в репозиторий.")
+            log("История успешно сохранена в репозиторий.")
     except Exception as e:
-        print(f"Не удалось запушить history.json: {e}")
+        log(f"Не удалось запушить history.json: {e}")
 
 
 def get_working_gemini_client_and_model():
@@ -103,7 +108,7 @@ def get_working_gemini_client_and_model():
 
         if "gemini" not in lower_name:
             continue
-        if any(bad in lower_name for bad in ["embedding", "imagen", "veo", "tts", "audio", "aqa"]):
+        if any(bad in lower_name for bad in ["embedding", "imagen", "veo", "tts", "audio", "aqa", "image", "computer-use"]):
             continue
 
         methods = getattr(m, "supported_generation_methods", None)
@@ -113,10 +118,10 @@ def get_working_gemini_client_and_model():
         candidates.append(clean_name)
 
     if not candidates:
-        raise RuntimeError("API не вернул ни одной модели Gemini для этого ключа.")
+        raise RuntimeError("API не вернул ни одной текстовой модели Gemini для этого ключа.")
 
     candidates.sort(key=lambda x: (0 if "flash" in x.lower() else 1, x))
-    print(f"Кандидаты моделей из API: {candidates}")
+    log(f"Кандидаты моделей из API: {candidates}")
 
     for model_name in candidates:
         try:
@@ -125,10 +130,10 @@ def get_working_gemini_client_and_model():
                 contents="Ответь одним словом: ОК"
             )
             if resp and resp.text:
-                print(f"Выбрана рабочая модель Gemini: {model_name}")
+                log(f"Выбрана рабочая модель Gemini: {model_name}")
                 return client, model_name
         except Exception as e:
-            print(f"Модель {model_name} недоступна ({e}), пробую следующую...")
+            log(f"Модель {model_name} недоступна, пробую следующую... ({str(e)[:120]})")
             continue
 
     raise RuntimeError("Ни одна из возвращённых API моделей не ответила на тестовый запрос.")
@@ -136,7 +141,7 @@ def get_working_gemini_client_and_model():
 
 def discover_telegram_channels() -> list:
     query = random.choice(DISCOVERY_QUERIES)
-    print(f"Ищу свежие каналы в Telegram по теме: {query}")
+    log(f"Ищу свежие каналы в Telegram по теме: {query}")
     own_channel = CHANNEL_ID.lstrip("@").lower()
     found_channels = []
 
@@ -155,7 +160,7 @@ def discover_telegram_channels() -> list:
                 continue
             found_channels.append(ch)
     except Exception as e:
-        print(f"Ошибка автопоиска каналов: {e}")
+        log(f"Ошибка автопоиска каналов: {e}")
 
     random.shuffle(found_channels)
     return found_channels[:6]
@@ -176,7 +181,7 @@ def is_product_link_alive(url: str) -> bool:
         page_text = resp.text.lower()
         for phrase in OUT_OF_STOCK_PHRASES:
             if phrase in page_text:
-                print(f"Товар распродан ('{phrase}'): {url}")
+                log(f"Товар распродан ('{phrase}'): {url}")
                 return False
 
         return True
@@ -242,7 +247,7 @@ def fetch_pepper_deals() -> list:
                 "raw_text": f"Товар: {title}\nЦена по скидке: {price}\nОписание: {desc}"
             })
     except Exception as e:
-        print(f"Ошибка парсинга Pepper.ru: {e}")
+        log(f"Ошибка парсинга Pepper.ru: {e}")
 
     return deals
 
@@ -347,7 +352,7 @@ def run_single_post_cycle(client, model_name: str, history: list) -> bool:
             if posts:
                 video_candidates.extend(list(reversed(posts))[:2])
         except Exception as e:
-            print(f"Не удалось прочитать @{channel}: {e}")
+            log(f"Не удалось прочитать @{channel}: {e}")
 
     pepper_candidates = fetch_pepper_deals()
 
@@ -363,7 +368,7 @@ def run_single_post_cycle(client, model_name: str, history: list) -> bool:
         if item["id"] in history:
             continue
 
-        print(f"Проверяю кандидата {item['id']}...")
+        log(f"Проверяю кандидата {item['id']}...")
 
         if item["store_url"]:
             if not is_product_link_alive(item["store_url"]):
@@ -379,11 +384,11 @@ def run_single_post_cycle(client, model_name: str, history: list) -> bool:
         try:
             ai_data = generate_post_content(client, model_name, item["raw_text"])
         except Exception as e:
-            print(f"Ошибка Gemini для {item['id']}: {e}")
+            log(f"Ошибка Gemini для {item['id']}: {e}")
             continue
 
         if not ai_data.get("is_product"):
-            print(f"Кандидат {item['id']} не является физическим товаром, пропускаю.")
+            log(f"Кандидат {item['id']} не является физическим товаром, пропускаю.")
             history.append(item["id"])
             save_and_push_history(history)
             continue
@@ -413,13 +418,13 @@ def run_single_post_cycle(client, model_name: str, history: list) -> bool:
                 f.write(m_resp.content)
 
             send_media_to_telegram(item["type"], temp_file, caption)
-            print(f"Успешно опубликовано: {item['id']}")
+            log(f"Успешно опубликовано: {item['id']}")
 
             history.append(item["id"])
             save_and_push_history(history)
             return True
         except Exception as e:
-            print(f"Ошибка при публикации {item['id']}: {e}")
+            log(f"Ошибка при публикации {item['id']}: {e}")
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
@@ -432,42 +437,31 @@ def main():
     history = load_history()
     client, model_name = get_working_gemini_client_and_model()
 
-    print(f"Запуск рабочего цикла на {MAX_RUNTIME_SECONDS / 3600:.1f} ч. Интервал постинга: {POST_INTERVAL_MINUTES} мин.")
+    log(f"Запуск рабочего цикла на {MAX_RUNTIME_SECONDS / 3600:.1f} ч. Интервал постинга: {POST_INTERVAL_MINUTES} мин. (Ночной режим отключён)")
 
     while True:
         elapsed = time.time() - start_time
         if elapsed >= MAX_RUNTIME_SECONDS:
-            print("Прошло 5.5 часов. Завершаю текущую сессию для передачи эстафеты следующему запуску.")
+            log("Прошло 5.5 часов. Завершаю текущую сессию для передачи эстафеты следующему запуску.")
             break
-
-        now_msk = datetime.now(MSK_TZ)
-        # Ночная тишина с 00:00 до 08:30 по МСК
-        if now_msk.hour < 8 or (now_msk.hour == 8 and now_msk.minute < 30):
-            print(f"[{now_msk.strftime('%H:%M')} МСК] Ночной режим. Сплю 15 минут...")
-            sleep_sec = min(15 * 60, MAX_RUNTIME_SECONDS - (time.time() - start_time))
-            if sleep_sec <= 0:
-                break
-            time.sleep(sleep_sec)
-            continue
 
         published = run_single_post_cycle(client, model_name, history)
 
         if published:
             wait_seconds = POST_INTERVAL_MINUTES * 60
         else:
-            print("Подходящих товаров не найдено, повторная попытка через 20 минут.")
-            wait_seconds = 20 * 60
+            log("Подходящих товаров не найдено, повторная попытка через 10 минут.")
+            wait_seconds = 10 * 60
 
         remaining = MAX_RUNTIME_SECONDS - (time.time() - start_time)
         if remaining <= 60:
-            print("Время сессии подходит к концу, выхожу для перезапуска.")
+            log("Время сессии подходит к концу, выхожу для перезапуска.")
             break
 
         sleep_duration = min(wait_seconds, remaining)
-        print(f"Следующая проверка через {int(sleep_duration // 60)} мин.")
+        log(f"Следующая публикация/проверка через {int(sleep_duration // 60)} мин.")
         time.sleep(sleep_duration)
 
 
 if __name__ == "__main__":
     main()
-            
