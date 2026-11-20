@@ -3,6 +3,7 @@ import re
 import json
 import time
 import random
+import hashlib
 import subprocess
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -18,8 +19,8 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 # Шаблон твоей партнёрской ссылки (добавишь после модерации ePN / Яндекс Дистрибуции)
 PARTNER_SEARCH_TEMPLATE = os.environ.get("PARTNER_SEARCH_TEMPLATE", "").strip()
 
-# Интервал между постами в минутах (180 = каждые 3 часа, 120 = каждые 2 часа)
-POST_INTERVAL_MINUTES = int(os.environ.get("POST_INTERVAL_MINUTES", "180"))
+# Интервал между постами в минутах (120 = каждые 2 часа, 180 = каждые 3 часа)
+POST_INTERVAL_MINUTES = int(os.environ.get("POST_INTERVAL_MINUTES", "120"))
 
 # Максимальное время жизни одного запуска (5.5 часов в секундах), после чего GitHub перезапустит воркфлоу
 MAX_RUNTIME_SECONDS = int(5.5 * 3600)
@@ -34,17 +35,6 @@ HEADERS = {
     ),
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
-
-DISCOVERY_QUERIES = [
-    'site:t.me/s "находки с маркетплейсов"',
-    'site:t.me/s "полезные гаджеты"',
-    'site:t.me/s "товары для дома" маркетплейс',
-    'site:t.me/s "автотовары" алиэкспресс маркетплейс',
-    'site:t.me/s "крутые находки" wildberries ozon',
-    'site:t.me/s "инструменты" aliexpress находки',
-    'site:t.me/s "распаковка" находки маркетплейс',
-    'site:t.me/s "яндекс маркет" находки',
-]
 
 OUT_OF_STOCK_PHRASES = [
     "нет в наличии",
@@ -140,30 +130,35 @@ def get_working_gemini_client_and_model():
 
 
 def discover_telegram_channels() -> list:
-    query = random.choice(DISCOVERY_QUERIES)
-    log(f"Ищу свежие каналы в Telegram по теме: {query}")
+    """Находит разные открытые Telegram-каналы через открытые веб-каталоги (без капчи поисковиков)."""
+    catalog_urls = [
+        "https://tlgrm.ru/channels?q=находки",
+        "https://tlgrm.ru/channels?q=маркетплейс",
+        "https://tlgrm.ru/channels?q=алиэкспресс",
+        "https://tlgrm.ru/channels?q=wildberries",
+        "https://tlgrm.ru/channels?q=гаджеты",
+    ]
+    url = random.choice(catalog_urls)
+    log(f"Ищу открытые каналы в каталоге: {url}")
     own_channel = CHANNEL_ID.lstrip("@").lower()
     found_channels = []
 
     try:
-        resp = requests.post(
-            "https://html.duckduckgo.com/html/",
-            data={"q": query},
-            headers=HEADERS,
-            timeout=20,
-        )
+        resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
-        matches = re.findall(r"t\.me/s/([a-zA-Z0-9_]{5,32})", resp.text)
+        matches = re.findall(r"(?:channels/@|t\.me/)([a-zA-Z0-9_]{5,32})", resp.text)
         for ch in matches:
             ch_lower = ch.lower()
-            if ch_lower == own_channel or ch_lower in [c.lower() for c in found_channels]:
+            if ch_lower in ["s", "joinchat", "share", "proxy", own_channel]:
                 continue
-            found_channels.append(ch)
+            if ch_lower not in [c.lower() for c in found_channels]:
+                found_channels.append(ch)
     except Exception as e:
-        log(f"Ошибка автопоиска каналов: {e}")
+        log(f"Ошибка чтения каталога каналов: {e}")
 
     random.shuffle(found_channels)
-    return found_channels[:6]
+    log(f"Найдено каналов для проверки: {found_channels[:8]}")
+    return found_channels[:8]
 
 
 def is_product_link_alive(url: str) -> bool:
@@ -190,64 +185,56 @@ def is_product_link_alive(url: str) -> bool:
 
 
 def fetch_pepper_deals() -> list:
-    url = "https://www.pepper.ru/"
+    """Читает официальный RSS-фид горячих скидок Pepper.ru (работает без Cloudflare)."""
+    rss_urls = [
+        "https://www.pepper.ru/rss/hot",
+        "https://www.pepper.ru/rss/all",
+    ]
     deals = []
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        articles = soup.select("article.thread")
-        for art in articles[:12]:
-            thread_id = art.get("id")
-            if not thread_id:
+    for rss_url in rss_urls:
+        try:
+            resp = requests.get(rss_url, headers=HEADERS, timeout=20)
+            if resp.status_code != 200:
                 continue
-            item_id = f"pepper:{thread_id}"
+            soup = BeautifulSoup(resp.text, "xml")
+            items = soup.select("item")
+            for it in items[:15]:
+                title_el = it.find("title")
+                link_el = it.find("link")
+                desc_el = it.find("description")
+                if not title_el or not link_el:
+                    continue
 
-            full_classes = " ".join(art.get("class", [])).lower()
-            if "expired" in full_classes or "истек" in art.get_text(" ").lower():
-                continue
+                title = title_el.get_text(strip=True)
+                deal_url = link_el.get_text(strip=True)
+                desc_html = desc_el.get_text() if desc_el else ""
+                desc_soup = BeautifulSoup(desc_html, "html.parser")
+                desc_text = desc_soup.get_text(" ", strip=True)
 
-            title_el = art.select_one("a.thread-title")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            deal_page_url = title_el.get("href", "")
+                img_el = desc_soup.find("img")
+                img_url = img_el["src"] if img_el and img_el.get("src") else ""
 
-            price_el = art.select_one(".thread-price")
-            price = price_el.get_text(strip=True) if price_el else ""
+                store_url = ""
+                for a_tag in desc_soup.find_all("a", href=True):
+                    href = a_tag["href"]
+                    if "pepper.ru" not in href and href.startswith("http"):
+                        store_url = href
+                        break
 
-            img_el = art.select_one("img.thread-image")
-            img_url = img_el.get("src") if img_el else ""
-
-            desc_el = art.select_one(".userHtml")
-            desc = desc_el.get_text(" ", strip=True) if desc_el else ""
-
-            store_url = ""
-            if deal_page_url:
-                try:
-                    d_resp = requests.get(deal_page_url, headers=HEADERS, timeout=15)
-                    d_soup = BeautifulSoup(d_resp.text, "html.parser")
-                    btn = d_soup.select_one("a[data-t='dealBtn'], a.btn--mode-primary[href*='visit']")
-                    if btn and btn.get("href"):
-                        visit_link = btn["href"]
-                        if visit_link.startswith("/"):
-                            visit_link = "https://www.pepper.ru" + visit_link
-                        v_resp = requests.get(visit_link, headers=HEADERS, timeout=15, allow_redirects=True)
-                        parsed = urllib.parse.urlparse(v_resp.url)
-                        store_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                except Exception:
-                    pass
-
-            deals.append({
-                "id": item_id,
-                "type": "photo",
-                "media_url": img_url,
-                "store_url": store_url,
-                "raw_text": f"Товар: {title}\nЦена по скидке: {price}\nОписание: {desc}"
-            })
-    except Exception as e:
-        log(f"Ошибка парсинга Pepper.ru: {e}")
+                url_hash = hashlib.md5(deal_url.encode("utf-8")).hexdigest()[:12]
+                item_id = f"pepper:{url_hash}"
+                deals.append({
+                    "id": item_id,
+                    "type": "photo",
+                    "media_url": img_url,
+                    "store_url": store_url,
+                    "raw_text": f"Товар: {title}\nОписание: {desc_text}"
+                })
+            if deals:
+                log(f"Из RSS Pepper.ru получено предложений: {len(deals)}")
+                break
+        except Exception as e:
+            log(f"Ошибка чтения RSS {rss_url}: {e}")
 
     return deals
 
@@ -465,3 +452,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+            
