@@ -37,7 +37,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           PARTNER_SEARCH_TEMPLATE: ${{ secrets.PARTNER_SEARCH_TEMPLATE }}
-          POST_INTERVAL_MINUTES: "120"
+          POST_INTERVAL_MINUTES: "20"
         run: |
           python -u bot.py
 
