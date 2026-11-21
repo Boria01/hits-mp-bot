@@ -34,7 +34,6 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# Реальные проверенные живые каналы по AliExpress и гаджетам
 INITIAL_SEED_CHANNELS = [
     "ali_muzhik",
     "aliexpress_rus",
@@ -43,29 +42,22 @@ INITIAL_SEED_CHANNELS = [
     "aligadgets",
     "ali_express_sale",
     "aliexpress_top_ru",
+    "ali_pro",
+    "gadget_ali",
+    "china_goods_top",
 ]
 
 IGNORED_USERNAMES = {
     "s", "joinchat", "share", "proxy", "iv", "addstickers", "setlanguage",
-    "botfather", "telegram", "durov", "username", "login", "contact", "vcnews", "addlist",
-    "tgstat", "telemetr", "tlgrm",
+    "botfather", "telegram", "durov", "username", "login", "contact",
+    "vcnews", "addlist", "tgstat", "telemetr", "tlgrm", "pikabu", "ixbt_official",
 }
-
-CHANNEL_TOPIC_KEYWORDS = [
-    "aliexpress", "алиэкспресс", "али", "яндекс маркет", "маркет",
-    "гаджет", "техник", "электроник", "инструмент", "автотовар",
-    "находк", "распаковк", "кита", "скидк", "обзор", "товар", "покупк",
-]
 
 POST_STOP_WORDS = [
     "wildberries", "вайлдберриз", "артикул wb", "арт. wb", "арт wb",
     "на вб", "с вб", "артикул озон", "арт. озон", "готовый образ", "лук на",
-]
-
-POST_PRODUCT_KEYWORDS = [
-    "цена", "руб", "₽", "$", "скидк", "находк", "распаковк", "заказать",
-    "купить", "aliexpress", "алиэкспресс", "яндекс", "маркет",
-    "обзор", "гаджет", "устройств", "аккумулятор", "мощност", "usb", "заказ",
+    "казино", "ставки на спорт", "букмекер", "криптовалют", "заработок в интернете",
+    "подписывайся на наш", "розыгрыш среди подписчиков", "итоги конкурса",
 ]
 
 MODEL_COOLDOWN = {}
@@ -153,68 +145,59 @@ def init_gemini_client_and_models():
     return client, candidates
 
 
-def discover_real_channels_from_catalogs(channels_pool: list):
-    """Автопоиск реальных живых каналов по AliExpress и гаджетам из открытых каталогов."""
+def discover_channels_from_web(channels_pool: list):
     own_channel = CHANNEL_ID.lstrip("@").lower()
-    catalog_urls = [
-        "https://tlgrm.ru/channels?q=aliexpress",
-        "https://tlgrm.ru/channels?q=%D0%B0%D0%BB%D0%B8%D1%8D%D0%BA%D1%81%D0%BF%D1%80%D0%B5%D1%81%D1%81",
-        "https://tlgrm.ru/channels?q=%D0%B3%D0%B0%D0%B4%D0%B6%D0%B5%D1%82%D1%8B",
-        "https://tlgrm.ru/channels?q=%D1%8F%D0%BD%D0%B4%D0%B5%D0%BA%D1%81+%D0%BC%D0%B0%D1%80%D0%BA%D0%B5%D1%82",
+    pages = [
+        "https://mysku.club/",
+        "https://www.ixbt.com/live/",
+        "https://pikabu.ru/tag/AliExpress/hot",
     ]
-    url = random.choice(catalog_urls)
+    url = random.choice(pages)
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
-            found = re.findall(r"(?:t\.me/|/channels/@)([a-zA-Z0-9_]{5,32})", resp.text)
+            found = re.findall(r"t\.me/([a-zA-Z0-9_]{5,32})", resp.text)
             added = 0
             for ch in found:
                 ch_l = ch.lower()
                 if ch_l in IGNORED_USERNAMES or ch_l == own_channel or ch_l.endswith("bot"):
                     continue
-                if "wb" in ch_l or "wildberries" in ch_l:
+                if "wb" in ch_l or "wildberries" in ch_l or "news" in ch_l:
                     continue
                 if ch_l not in [c.lower() for c in channels_pool]:
                     channels_pool.append(ch)
                     added += 1
             if added:
-                log(f"Из каталога добавлено новых каналов: +{added} (всего в пуле: {len(channels_pool)})")
+                log(f"С {url} найдено новых каналов: +{added} (всего в базе: {len(channels_pool)})")
     except Exception as e:
-        log(f"Ошибка обхода каталога каналов: {e}")
+        log(f"Ошибка веб-поиска каналов ({url}): {e}")
 
 
-def is_target_channel(channel_name: str, soup: BeautifulSoup) -> bool:
+def is_valid_non_wb_channel(channel_name: str, soup: BeautifulSoup) -> bool:
     ch_lower = channel_name.lower()
     if "wb" in ch_lower or "wildberries" in ch_lower:
         return False
 
     title_el = soup.select_one(".tgme_channel_info_header_title")
-    desc_el = soup.select_one(".tgme_channel_info_description")
     title_text = title_el.get_text(" ", strip=True).lower() if title_el else ""
-    desc_text = desc_el.get_text(" ", strip=True).lower() if desc_el else ""
-
-    # Если канал вообще не существует, title_text пустой
     if not title_text:
         return False
 
     if "wildberries" in title_text or "вайлдберриз" in title_text:
         return False
 
-    full_header = f"{ch_lower} {title_text} {desc_text}"
-    return any(kw in full_header for kw in CHANNEL_TOPIC_KEYWORDS)
+    return True
 
 
 def looks_like_target_post(text: str) -> bool:
     t_lower = text.lower()
-    if len(t_lower) < 25 or len(t_lower) > 1800:
+    if len(t_lower) < 35 or len(t_lower) > 1800:
         return False
 
     if any(sw in t_lower for sw in POST_STOP_WORDS):
         return False
 
-    has_keyword = any(kw in t_lower for kw in POST_PRODUCT_KEYWORDS)
-    has_digits = bool(re.search(r"\d{2,}", t_lower))
-    return has_keyword and has_digits
+    return True
 
 
 def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> list:
@@ -232,8 +215,8 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        if not is_target_channel(channel, soup):
-            log(f"Канал @{channel} не существует или не по теме, удаляю из пула.")
+        if not is_valid_non_wb_channel(channel, soup):
+            log(f"Канал @{channel} пустой или про WB, удаляю из пула.")
             if channel in channels_pool:
                 channels_pool.remove(channel)
             return []
@@ -243,7 +226,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
             d_l = d_ch.lower()
             if d_l in IGNORED_USERNAMES or d_l == own_channel or d_l.endswith("bot"):
                 continue
-            if "wb" in d_l or "wildberries" in d_l:
+            if "wb" in d_l or "wildberries" in d_l or "news" in d_l:
                 continue
             if d_l not in [c.lower() for c in channels_pool]:
                 channels_pool.append(d_ch)
@@ -284,7 +267,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
                         "raw_text": raw_text
                     })
 
-        log(f"@{channel}: целевых постов на странице: {len(results)}")
+        log(f"@{channel}: найдено постов с медиа: {len(results)}")
     except Exception as e:
         log(f"Ошибка чтения @{channel}: {e}")
 
@@ -311,9 +294,9 @@ def generate_post_content(client, models: list, raw_text: str) -> dict:
 
 Требования:
 1. Верни строго JSON: {{"is_product": false}}, если это:
-   - НЕ физический товар (реклама канала, бота, казино, ставок, курсов, кредитов, подписки);
+   - НЕ физический товар (новость, мем, реклама канала, бота, казино, ставок, курсов, кредитов, подписки);
    - подборка/коллаж из нескольких разных вещей одежды (женский образ/лук);
-   - товар, привязанный строго к Wildberries.
+   - товар, привязанный строго к Wildberries или Ozon.
 2. Если это ОДИН конкретный крутой товар (гаджет, электроника, инструмент, автотовар, полезная вещь для дома/кухни), верни строго JSON без markdown-обёртки:
 {{
   "is_product": true,
@@ -371,95 +354,120 @@ def send_media_to_telegram(media_type: str, media_path: str, caption: str):
             raise RuntimeError(f"Ошибка Telegram API: {res_json}")
 
 
-def run_single_post_cycle(client, models: list, history: list, channels_pool: list):
-    if len(channels_pool) < 10:
-        discover_real_channels_from_catalogs(channels_pool)
-
-    if not channels_pool:
-        channels_pool.extend(INITIAL_SEED_CHANNELS)
-
-    sample_size = min(6, len(channels_pool))
-    selected_channels = random.sample(channels_pool, sample_size)
-    log(f"Проверяю каналы ({len(channels_pool)} в базе): {selected_channels}")
-
-    video_posts = []
-    photo_posts = []
-
-    for ch in selected_channels:
-        posts = parse_telegram_channel_and_discover(ch, channels_pool)
-        for p in reversed(posts):
-            if p["id"] in history:
-                continue
-            if p["type"] == "video":
-                video_posts.append(p)
-            else:
-                photo_posts.append(p)
-
-    candidates = video_posts + photo_posts
-    log(f"Свежих кандидатов (не из истории): {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
-
-    ai_calls = 0
-    for item in candidates:
-        if item["id"] in history:
-            continue
-        if ai_calls >= MAX_AI_CALLS_PER_CYCLE:
-            log(f"Достигнут лимит {MAX_AI_CALLS_PER_CYCLE} AI-запросов за цикл — останавливаю перебор.")
-            break
-
-        ai_calls += 1
-        try:
-            ai_data = generate_post_content(client, models, item["raw_text"])
-        except QuotaExhausted:
-            log("Квота AI временно исчерпана по всем моделям — ухожу в паузу на 30 мин.")
-            save_and_push_state(history, channels_pool)
+def prepare_next_post(client, models: list, history: list, channels_pool: list, start_time: float):
+    """
+    Роет каналы до тех пор, пока не подготовит (скачает медиа + сгенерирует текст)
+    один готовый пост в буфер. Возвращает dict поста или None, если кончилось время/квота.
+    """
+    while True:
+        if MAX_RUNTIME_SECONDS - (time.time() - start_time) <= 90:
             return None
-        except Exception as e:
-            log(f"Ошибка AI для {item['id']}: {e}")
-            history.append(item["id"])
-            continue
 
-        if not ai_data.get("is_product"):
-            log(f"Пост {item['id']} отсеян AI (не одиночный товар / WB / реклама).")
-            history.append(item["id"])
-            continue
+        if len(channels_pool) < 8:
+            discover_channels_from_web(channels_pool)
+            for seed in INITIAL_SEED_CHANNELS:
+                if seed not in channels_pool:
+                    channels_pool.append(seed)
 
-        title = ai_data["title"]
-        desc = ai_data["description"]
-        search_query = ai_data["search_query"]
+        sample_size = min(6, len(channels_pool))
+        selected_channels = random.sample(channels_pool, sample_size)
+        log(f"Ищу и готовлю следующий пост по каналам ({len(channels_pool)} в базе): {selected_channels}")
 
-        if PARTNER_SEARCH_TEMPLATE:
-            encoded_q = urllib.parse.quote(search_query)
-            link = PARTNER_SEARCH_TEMPLATE.format(query=encoded_q)
-            footer = f'👉 <a href="{link}">Найти на маркетплейсе</a>'
-        else:
-            footer = f"🔎 <b>Поиск на маркетплейсах:</b> <code>{search_query}</code>"
+        video_posts = []
+        photo_posts = []
 
-        caption = f"<b>{title}</b>\n\n{desc}\n\n{footer}"
+        for ch in selected_channels:
+            posts = parse_telegram_channel_and_discover(ch, channels_pool)
+            for p in reversed(posts):
+                if p["id"] in history:
+                    continue
+                if p["type"] == "video":
+                    video_posts.append(p)
+                else:
+                    photo_posts.append(p)
 
-        ext = ".mp4" if item["type"] == "video" else ".jpg"
-        temp_file = f"temp_media{ext}"
+        candidates = video_posts + photo_posts
+        log(f"Свежих кандидатов (не из истории): {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
 
-        try:
-            m_resp = requests.get(item["media_url"], headers=HEADERS, timeout=40)
-            m_resp.raise_for_status()
-            with open(temp_file, "wb") as f:
-                f.write(m_resp.content)
+        ai_calls = 0
+        for item in candidates:
+            if item["id"] in history:
+                continue
+            if ai_calls >= MAX_AI_CALLS_PER_CYCLE:
+                log(f"Достигнут лимит {MAX_AI_CALLS_PER_CYCLE} AI-запросов за проход.")
+                break
 
-            send_media_to_telegram(item["type"], temp_file, caption)
-            log(f"ОПУБЛИКОВАНО В КАНАЛ: {item['id']} -> {title}")
+            ai_calls += 1
+            try:
+                ai_data = generate_post_content(client, models, item["raw_text"])
+            except QuotaExhausted:
+                log("Квота AI временно исчерпана по всем моделям — пауза 30 мин.")
+                save_and_push_state(history, channels_pool)
+                time.sleep(min(30 * 60, max(60, MAX_RUNTIME_SECONDS - (time.time() - start_time) - 60)))
+                break
+            except Exception as e:
+                log(f"Ошибка AI для {item['id']}: {e}")
+                history.append(item["id"])
+                continue
 
-            history.append(item["id"])
-            save_and_push_state(history, channels_pool)
-            return True
-        except Exception as e:
-            log(f"Ошибка отправки {item['id']} в Telegram: {e}")
-            history.append(item["id"])
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+            if not ai_data.get("is_product"):
+                log(f"Пост {item['id']} отсеян AI (не одиночный товар / WB / реклама).")
+                history.append(item["id"])
+                continue
 
-    save_and_push_state(history, channels_pool)
-    return False
+            title = ai_data["title"]
+            desc = ai_data["description"]
+            search_query = ai_data["search_query"]
+
+            if PARTNER_SEARCH_TEMPLATE:
+                encoded_q = urllib.parse.quote(search_query)
+                link = PARTNER_SEARCH_TEMPLATE.format(query=encoded_q)
+                footer = f'👉 <a href="{link}">Найти на маркетплейсе</a>'
+            else:
+                footer = f"🔎 <b>Поиск на маркетплейсах:</b> <code>{search_query}</code>"
+
+            caption = f"<b>{title}</b>\n\n{desc}\n\n{footer}"
+
+            ext = ".mp4" if item["type"] == "video" else ".jpg"
+            ready_file = f"prepared_media{ext}"
+
+            try:
+                m_resp = requests.get(item["media_url"], headers=HEADERS, timeout=40)
+                m_resp.raise_for_status()
+                with open(ready_file, "wb") as f:
+                    f.write(m_resp.content)
+
+                history.append(item["id"])
+                save_and_push_state(history, channels_pool)
+                log(f"БУФЕР ГОТОВ: [{item['id']}] «{title}» ждёт момента публикации.")
+                return {
+                    "id": item["id"],
+                    "type": item["type"],
+                    "file": ready_file,
+                    "caption": caption,
+                    "title": title,
+                }
+            except Exception as e:
+                log(f"Ошибка скачивания медиа для {item['id']}: {e}")
+                history.append(item["id"])
+                if os.path.exists(ready_file):
+                    os.remove(ready_file)
+
+        save_and_push_state(history, channels_pool)
+        log("В этой пачке подходящего поста не нашлось — ищу дальше без сна (пауза 15 сек)...")
+        time.sleep(15)
+
+
+def publish_prepared_post(prepared: dict):
+    """Мгновенно публикует заранее подготовленный пост и удаляет временный файл."""
+    try:
+        send_media_to_telegram(prepared["type"], prepared["file"], prepared["caption"])
+        log(f"ОПУБЛИКОВАНО В КАНАЛ БЕЗ ЗАДЕРЖКИ: {prepared['id']} -> {prepared['title']}")
+    except Exception as e:
+        log(f"Ошибка публикации подготовленного поста {prepared['id']}: {e}")
+    finally:
+        if os.path.exists(prepared["file"]):
+            os.remove(prepared["file"])
 
 
 def main():
@@ -468,7 +476,9 @@ def main():
     channels_pool = load_json_list(CHANNELS_POOL_FILE, INITIAL_SEED_CHANNELS)
 
     client, models = init_gemini_client_and_models()
-    log(f"Старт цикла 5.5 ч. Интервал после публикации: {POST_INTERVAL_MINUTES} мин.")
+    log(f"Старт цикла 5.5 ч с предподготовкой постов. Интервал: {POST_INTERVAL_MINUTES} мин.")
+
+    prepared_post = None
 
     while True:
         elapsed = time.time() - start_time
@@ -476,26 +486,33 @@ def main():
             log("Прошло 5.5 часов. Завершаю сессию для перезапуска.")
             break
 
-        published = run_single_post_cycle(client, models, history, channels_pool)
+        # 1. Если буфер пуст (первый запуск) — готовим пост прямо сейчас
+        if prepared_post is None:
+            prepared_post = prepare_next_post(client, models, history, channels_pool, start_time)
+            if prepared_post is None:
+                break
 
-        if published is None:
-            wait_seconds = 30 * 60
-        elif not published:
-            log("Подходящих свежих постов пока нет — следующая попытка через 5 минут.")
-            wait_seconds = 5 * 60
-        else:
-            wait_seconds = POST_INTERVAL_MINUTES * 60
+        # 2. Мгновенно публикуем готовый пост из буфера
+        publish_prepared_post(prepared_post)
+        prepared_post = None
+
+        # 3. Сразу же готовим следующий пост в буфер ДО ухода в сон
+        prep_start = time.time()
+        prepared_post = prepare_next_post(client, models, history, channels_pool, start_time)
+        prep_took = int(time.time() - prep_start)
 
         remaining = MAX_RUNTIME_SECONDS - (time.time() - start_time)
         if remaining <= 60:
             log("Время сессии истекает, выхожу для передачи эстафеты.")
             break
 
+        # Вычитаем время подготовки, чтобы следующий пост вышел точно по расписанию
+        wait_seconds = max(10, POST_INTERVAL_MINUTES * 60 - prep_took)
         sleep_duration = min(wait_seconds, remaining)
-        log(f"Сплю {int(sleep_duration // 60)} мин...")
+        log(f"Следующий пост уже заряжен в буфере! Сплю {int(sleep_duration // 60)} мин. {int(sleep_duration % 60)} сек. до выхода...")
         time.sleep(sleep_duration)
 
 
 if __name__ == "__main__":
     main()
-        
+                      
