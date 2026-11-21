@@ -17,9 +17,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@hits_mp")
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"].strip()
 
-# Если задано в Secrets — берём оттуда; если пусто — получаем список из API (0 квоты тратится)
 ENV_GEMINI_MODELS = os.environ.get("GEMINI_MODELS", "").strip()
-
 PARTNER_SEARCH_TEMPLATE = os.environ.get("PARTNER_SEARCH_TEMPLATE", "").strip()
 POST_INTERVAL_MINUTES = int(os.environ.get("POST_INTERVAL_MINUTES", "20"))
 MAX_AI_CALLS_PER_DAY = int(os.environ.get("MAX_AI_CALLS_PER_DAY", "180"))
@@ -35,8 +33,8 @@ REJECTED_FILE = "rejected_channels.json"
 STATE_FILE = "state.json"
 MSK_TZ = timezone(timedelta(hours=3))
 
-MAX_VIDEO_BYTES = 48 * 1024 * 1024   # лимит Bot API ~50 МБ
-MAX_PHOTO_BYTES = 9 * 1024 * 1024    # лимит sendPhoto 10 МБ
+MAX_VIDEO_BYTES = 48 * 1024 * 1024
+MAX_PHOTO_BYTES = 9 * 1024 * 1024
 
 HEADERS = {
     "User-Agent": (
@@ -84,7 +82,6 @@ POST_FILTER_KEYWORDS = (
     "гаджет", "аккумулятор", "мощност", "обзор", "распаковк", "aliexpress", "алиэкспресс",
 )
 
-# --- ГЛОБАЛЬНОЕ СОСТОЯНИЕ ---
 MODEL_COOLDOWN = {}
 ATTEMPTS = {}
 STATE = {"last_post_ts": 0.0, "ai_day": "", "ai_calls": 0}
@@ -99,8 +96,6 @@ def log(msg: str):
     now_str = datetime.now(MSK_TZ).strftime("%H:%M:%S")
     print(f"[{now_str} МСК] {msg}", flush=True)
 
-
-# ---------------------------------------------------------------- файлы/git
 
 def load_json(filepath: str, default):
     if os.path.exists(filepath):
@@ -141,8 +136,6 @@ def save_and_push_state(history: list, channels_pool: list):
         log(f"Ошибка синхронизации с GitHub: {e}")
 
 
-# ---------------------------------------------------------------- инициализация AI
-
 def init_gemini_client_and_models():
     client = genai.Client(
         api_key=GEMINI_API_KEY,
@@ -154,7 +147,6 @@ def init_gemini_client_and_models():
         log(f"Использую заданные модели из ENV: {models}")
         return client, models
 
-    # models.list() не расходует дневную квоту generateContent и защищает от 404 при смене версий
     raw_models = list(client.models.list())
     candidates = []
 
@@ -183,8 +175,6 @@ def init_gemini_client_and_models():
     log(f"Список моделей из API (0 квоты потрачено): {candidates}")
     return client, candidates
 
-
-# ---------------------------------------------------------------- каналы
 
 def reject_channel(channel: str):
     if channel.lower() not in [r.lower() for r in REJECTED]:
@@ -240,8 +230,6 @@ def is_valid_target_channel(channel_name: str, soup: BeautifulSoup) -> bool:
     return any(kw in full_header for kw in CHANNEL_TOPIC_KEYWORDS)
 
 
-# ---------------------------------------------------------------- тексты
-
 def clean_donor_text(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"@\w+", "", text)
@@ -265,8 +253,6 @@ def looks_like_target_post(text: str) -> bool:
     has_digits = bool(re.search(r"\d{2,}", t_lower))
     has_kw = any(k in t_lower for k in POST_FILTER_KEYWORDS)
     return has_digits and has_kw
-
-
 def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> list:
     url = f"https://t.me/s/{channel}"
     own_channel = CHANNEL_ID.lstrip("@").lower()
@@ -334,8 +320,6 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
     return results
 
 
-# ---------------------------------------------------------------- Gemini
-
 def count_ai_call():
     today = datetime.now(MSK_TZ).strftime("%Y-%m-%d")
     if STATE.get("ai_day") != today:
@@ -352,7 +336,6 @@ def ai_daily_limit_reached() -> bool:
 
 
 def generate_batch_content(client, models: list, batch: list) -> dict:
-    """Одна пачка постов -> один запрос. Возвращает {idx: entry}."""
     if ai_daily_limit_reached():
         log(f"Суточный лимит AI-запросов ({MAX_AI_CALLS_PER_DAY}) исчерпан.")
         raise QuotaExhausted()
@@ -428,8 +411,6 @@ def generate_batch_content(client, models: list, batch: list) -> dict:
     raise QuotaExhausted()
 
 
-# ---------------------------------------------------------------- Telegram
-
 def build_safe_caption(title: str, desc: str, search_query: str) -> str:
     raw_title = title.strip()
     raw_desc = desc.strip()
@@ -483,8 +464,6 @@ def send_media_to_telegram(media_type: str, media_path: str, caption: str):
             raise RuntimeError(f"Ошибка Telegram API: {res_json}")
 
 
-# ---------------------------------------------------------------- подготовка
-
 def mark_item_seen(history: list, item: dict):
     if item["id"] not in history:
         history.append(item["id"])
@@ -517,4 +496,184 @@ def prepare_next_post(client, models: list, history: list, channels_pool: list, 
         for ch in selected:
             for p in reversed(parse_telegram_channel_and_discover(ch, channels_pool)):
                 if p["id"] in history:
-     
+                    continue
+                th = p.get("txt_hash")
+                if th and (th in history or th in seen_hashes):
+                    mark_item_seen(history, p)
+                    unsaved += 1
+                    continue
+                if th:
+                    seen_hashes.add(th)
+                (video_posts if p["type"] == "video" else photo_posts).append(p)
+            time.sleep(1)
+
+        candidates = video_posts + photo_posts
+        log(f"Уникальных кандидатов: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
+
+        batch_calls = 0
+        for i in range(0, len(candidates), BATCH_SIZE):
+            if batch_calls >= MAX_AI_BATCH_CALLS_PER_CYCLE:
+                log(f"Лимит {MAX_AI_BATCH_CALLS_PER_CYCLE} батч-запросов за проход.")
+                break
+
+            batch = [c for c in candidates[i: i + BATCH_SIZE] if c["id"] not in history]
+            if not batch:
+                continue
+
+            batch_calls += 1
+            for c in batch:
+                ATTEMPTS[c["id"]] = ATTEMPTS.get(c["id"], 0) + 1
+
+            try:
+                results = generate_batch_content(client, models, batch)
+            except QuotaExhausted:
+                log("AI недоступен (кулдаун/суточный лимит) — пауза 15 мин.")
+                for c in batch:
+                    ATTEMPTS[c["id"]] = max(0, ATTEMPTS[c["id"]] - 1)
+                if unsaved:
+                    save_and_push_state(history, channels_pool)
+                    unsaved = 0
+                time.sleep(min(15 * 60, max(60, MAX_RUNTIME_SECONDS - (time.time() - start_time) - 60)))
+                break
+            except Exception as e:
+                log(f"Ошибка AI на батче: {e}")
+                for c in batch:
+                    if ATTEMPTS[c["id"]] >= MAX_ATTEMPTS_PER_POST:
+                        mark_item_seen(history, c)
+                        unsaved += 1
+                continue
+
+            if not results:
+                for c in batch:
+                    if ATTEMPTS[c["id"]] >= MAX_ATTEMPTS_PER_POST:
+                        mark_item_seen(history, c)
+                        unsaved += 1
+                continue
+
+            for idx, item in enumerate(batch, start=1):
+                ai_data = results.get(idx)
+                if ai_data is None:
+                    if ATTEMPTS[item["id"]] >= MAX_ATTEMPTS_PER_POST:
+                        mark_item_seen(history, item)
+                        unsaved += 1
+                    continue
+
+                if not ai_data.get("is_product"):
+                    log(f"Пост {item['id']} отсеян AI (не одиночный товар / WB / реклама).")
+                    mark_item_seen(history, item)
+                    unsaved += 1
+                    continue
+
+                title = str(ai_data.get("title", "")).strip()
+                desc = str(ai_data.get("description", "")).strip()
+                search_query = str(ai_data.get("search_query", title)).strip()
+                if not title or not desc:
+                    mark_item_seen(history, item)
+                    unsaved += 1
+                    continue
+
+                caption = build_safe_caption(title, desc, search_query)
+                ext = ".mp4" if item["type"] == "video" else ".jpg"
+                ready_file = f"prepared_media{ext}"
+
+                try:
+                    download_media(item["media_url"], ready_file, item["type"])
+                    mark_item_seen(history, item)
+                    save_and_push_state(history, channels_pool)
+                    log(f"БУФЕР ГОТОВ: [{item['id']}] «{title}» ждёт момента публикации.")
+                    return {
+                        "id": item["id"],
+                        "type": item["type"],
+                        "file": ready_file,
+                        "caption": caption,
+                        "title": title,
+                    }
+                except Exception as e:
+                    log(f"Ошибка скачивания медиа для {item['id']}: {e}")
+                    mark_item_seen(history, item)
+                    unsaved += 1
+                    if os.path.exists(ready_file):
+                        os.remove(ready_file)
+
+        if unsaved >= 15:
+            save_and_push_state(history, channels_pool)
+            unsaved = 0
+
+        empty_loops += 1
+        pause_sec = min(120, 45 + empty_loops * 15)
+        log(f"Подходящего поста в пачке нет — следующий поиск через {pause_sec} сек...")
+        time.sleep(pause_sec)
+
+
+def publish_prepared_post(prepared: dict, history: list, channels_pool: list):
+    try:
+        send_media_to_telegram(prepared["type"], prepared["file"], prepared["caption"])
+        STATE["last_post_ts"] = time.time()
+        save_and_push_state(history, channels_pool)
+        log(f"ОПУБЛИКОВАНО В КАНАЛ БЕЗ ЗАДЕРЖКИ: {prepared['id']} -> {prepared['title']}")
+    except Exception as e:
+        log(f"Ошибка публикации подготовленного поста {prepared['id']}: {e}")
+    finally:
+        if os.path.exists(prepared["file"]):
+            os.remove(prepared["file"])
+
+
+def main():
+    global STATE, REJECTED
+    start_time = time.time()
+    history = load_json(HISTORY_FILE, [])
+    channels_pool = load_json(CHANNELS_POOL_FILE, INITIAL_SEED_CHANNELS)
+    REJECTED = load_json(REJECTED_FILE, [])
+    STATE = load_json(STATE_FILE, {"last_post_ts": 0.0, "ai_day": "", "ai_calls": 0})
+
+    client, models = init_gemini_client_and_models()
+    log(f"Старт цикла 5.5 ч (батчинг x{BATCH_SIZE} + буфер). Интервал: {POST_INTERVAL_MINUTES} мин.")
+
+    prepared_post = None
+
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed >= MAX_RUNTIME_SECONDS:
+            if prepared_post is not None:
+                log("Сессия завершается — публикуем оставшийся пост из буфера перед выходом.")
+                publish_prepared_post(prepared_post, history, channels_pool)
+            log("Прошло 5.5 часов. Завершаю сессию для перезапуска.")
+            break
+
+        if prepared_post is None:
+            prepared_post = prepare_next_post(client, models, history, channels_pool, start_time)
+            if prepared_post is None:
+                break
+
+        since_last = time.time() - float(STATE.get("last_post_ts", 0.0))
+        min_gap = POST_INTERVAL_MINUTES * 60
+        if since_last < min_gap:
+            wait_before_pub = min(min_gap - since_last, MAX_RUNTIME_SECONDS - (time.time() - start_time) - 60)
+            if wait_before_pub > 5:
+                log(f"Пост готов в буфере, жду {int(wait_before_pub // 60)} мин. {int(wait_before_pub % 60)} сек. по расписанию...")
+                time.sleep(wait_before_pub)
+
+        publish_prepared_post(prepared_post, history, channels_pool)
+        prepared_post = None
+
+        prep_start = time.time()
+        prepared_post = prepare_next_post(client, models, history, channels_pool, start_time)
+        prep_took = int(time.time() - prep_start)
+
+        remaining = MAX_RUNTIME_SECONDS - (time.time() - start_time)
+        if remaining <= 60:
+            if prepared_post is not None:
+                log("Время сессии истекает — публикуем буфер перед передачей эстафеты.")
+                publish_prepared_post(prepared_post, history, channels_pool)
+            log("Выхожу для передачи эстафеты.")
+            break
+
+        wait_seconds = max(10, POST_INTERVAL_MINUTES * 60 - prep_took)
+        sleep_duration = min(wait_seconds, remaining)
+        log(f"Следующий пост уже заряжен в буфере! Сплю {int(sleep_duration // 60)} мин. {int(sleep_duration % 60)} сек. до выхода...")
+        time.sleep(sleep_duration)
+
+
+if __name__ == "__main__":
+    main()
+    
