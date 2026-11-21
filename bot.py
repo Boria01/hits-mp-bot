@@ -253,6 +253,8 @@ def looks_like_target_post(text: str) -> bool:
     has_digits = bool(re.search(r"\d{2,}", t_lower))
     has_kw = any(k in t_lower for k in POST_FILTER_KEYWORDS)
     return has_digits and has_kw
+
+
 def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> list:
     url = f"https://t.me/s/{channel}"
     own_channel = CHANNEL_ID.lstrip("@").lower()
@@ -408,19 +410,22 @@ def generate_batch_content(client, models: list, batch: list) -> dict:
                 continue
             raise
 
-    raise QuotaExhausted()
-
-
-def build_safe_caption(title: str, desc: str, search_query: str) -> str:
+    raise QuotaEнрxhausted()
+                def build_safe_caption(title: str, desc: str, search_query: str) -> str:
     raw_title = title.strip()
     raw_desc = desc.strip()
+    encoded_q = urllib.parse.quote(search_query.strip())
 
     if PARTNER_SEARCH_TEMPLATE:
-        encoded_q = urllib.parse.quote(search_query.strip())
         link = PARTNER_SEARCH_TEMPLATE.replace("{query}", encoded_q)
         footer = f'👉 <a href="{html.escape(link, quote=True)}">Найти на маркетплейсе</a>'
     else:
-        footer = f"🔎 <b>Поиск на маркетплейсах:</b> <code>{html.escape(search_query.strip())}</code>"
+        ali_link = f"https://aliexpress.ru/wholesale?SearchText={encoded_q}"
+        ym_link = f"https://market.yandex.ru/search?text={encoded_q}"
+        footer = (
+            f'👉 <a href="{html.escape(ali_link, quote=True)}">Найти на AliExpress</a>  |  '
+            f'<a href="{html.escape(ym_link, quote=True)}">Яндекс Маркет</a>'
+        )
 
     safe_title = html.escape(raw_title)
     overhead = len(f"<b>{safe_title}</b>\n\n\n\n{footer}")
@@ -676,4 +681,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
