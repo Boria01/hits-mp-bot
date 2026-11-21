@@ -410,8 +410,8 @@ def generate_batch_content(client, models: list, batch: list) -> dict:
                 continue
             raise
 
-    raise QuotaEнрxhausted()
-                def build_safe_caption(title: str, desc: str, search_query: str) -> str:
+    raise QuotaExhausted()
+    def build_safe_caption(title: str, desc: str, search_query: str) -> str:
     raw_title = title.strip()
     raw_desc = desc.strip()
     encoded_q = urllib.parse.quote(search_query.strip())
