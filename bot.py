@@ -27,6 +27,11 @@ BATCH_SIZE = 5
 MAX_AI_BATCH_CALLS_PER_CYCLE = 2
 MAX_ATTEMPTS_PER_POST = 3
 
+# --- НАСТРОЙКИ КАРАНТИНА КАНАЛОВ (В СЕКУНДАХ) ---
+QUARANTINE_NO_NEW_SEC = 3 * 3600       # 3 часа, если в канале все посты уже отработаны
+QUARANTINE_NO_PRODUCTS_SEC = 90 * 60   # 1.5 часа, если AI отсеял все посты канала
+QUARANTINE_HTTP_ERR_SEC = 30 * 60      # 30 минут при временной ошибке сети/429
+
 HISTORY_FILE = "history.json"
 CHANNELS_POOL_FILE = "channels_pool.json"
 REJECTED_FILE = "rejected_channels.json"
@@ -45,18 +50,25 @@ HEADERS = {
 }
 
 INITIAL_SEED_CHANNELS = [
-    "ali_muzhik",
-    "aliexpress_rus",
     "nahodki_aliexpress",
-    "kitaec_ru",
     "aligadgets",
     "ali_express_sale",
     "aliexpress_top_ru",
-    "ali_pro",
-    "gadget_ali",
     "china_goods_top",
+    "ali_top_skidki",
+    "aliexpress_halava",
+    "aliskidki_top",
 ]
-SEED_LOWER = {s.lower() for s in INITIAL_SEED_CHANNELS}
+
+TLGRM_SEARCH_QUERIES = [
+    "aliexpress",
+    "алиэкспресс",
+    "находки",
+    "яндекс маркет",
+    "гаджеты",
+    "скидки",
+    "автотовары",
+]
 
 IGNORED_USERNAMES = {
     "s", "joinchat", "share", "proxy", "iv", "addstickers", "setlanguage",
@@ -83,9 +95,11 @@ POST_FILTER_KEYWORDS = (
 )
 
 MODEL_COOLDOWN = {}
+CHANNEL_QUARANTINE = {}
 ATTEMPTS = {}
 STATE = {"last_post_ts": 0.0, "ai_day": "", "ai_calls": 0}
 REJECTED = []
+_last_discovery_ts = 0.0
 
 
 class QuotaExhausted(Exception):
@@ -95,6 +109,17 @@ class QuotaExhausted(Exception):
 def log(msg: str):
     now_str = datetime.now(MSK_TZ).strftime("%H:%M:%S")
     print(f"[{now_str} МСК] {msg}", flush=True)
+
+
+def set_channel_quarantine(channel: str, seconds: int, reason: str = ""):
+    CHANNEL_QUARANTINE[channel.lower()] = time.time() + seconds
+    mins = max(1, seconds // 60)
+    suffix = f" ({reason})" if reason else ""
+    log(f"Канал @{channel} отправлен в карантин на {mins} мин.{suffix}")
+
+
+def is_channel_in_quarantine(channel: str) -> bool:
+    return CHANNEL_QUARANTINE.get(channel.lower(), 0) > time.time()
 
 
 def load_json(filepath: str, default):
@@ -195,18 +220,37 @@ def try_add_channel(ch: str, channels_pool: list, own_channel: str) -> bool:
     return True
 
 
-def discover_channels_from_mysku(channels_pool: list):
+def discover_new_channels(channels_pool: list):
+    """Ищет новые каналы по маркетплейсам на tlgrm.ru и mysku.club."""
+    global _last_discovery_ts
+    if time.time() - _last_discovery_ts < 300:
+        return
+    _last_discovery_ts = time.time()
+
     own_channel = CHANNEL_ID.lstrip("@").lower()
-    url = "https://mysku.club/"
+    added_total = 0
+
+    for q in random.sample(TLGRM_SEARCH_QUERIES, min(4, len(TLGRM_SEARCH_QUERIES))):
+        try:
+            url = f"https://tlgrm.ru/channels?q={urllib.parse.quote(q)}"
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code == 200:
+                found = re.findall(r"/channels/@([a-zA-Z0-9_]{4,32})", resp.text)
+                added_total += sum(1 for ch in found if try_add_channel(ch, channels_pool, own_channel))
+            time.sleep(1)
+        except Exception as e:
+            log(f"Ошибка поиска каналов на tlgrm.ru ({q}): {e}")
+
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = requests.get("https://mysku.club/", headers=HEADERS, timeout=15)
         if resp.status_code == 200:
             found = re.findall(r"t\.me/([a-zA-Z0-9_]{5,32})", resp.text)
-            added = sum(1 for ch in found if try_add_channel(ch, channels_pool, own_channel))
-            if added:
-                log(f"С mysku.club добавлено каналов-кандидатов: +{added} (всего: {len(channels_pool)})")
+            added_total += sum(1 for ch in found if try_add_channel(ch, channels_pool, own_channel))
     except Exception as e:
         log(f"Ошибка обхода mysku.club: {e}")
+
+    if added_total:
+        log(f"Найдено новых каналов-кандидатов: +{added_total} (всего в базе: {len(channels_pool)})")
 
 
 def is_valid_target_channel(channel_name: str, soup: BeautifulSoup) -> bool:
@@ -223,8 +267,6 @@ def is_valid_target_channel(channel_name: str, soup: BeautifulSoup) -> bool:
         return False
     if "wildberries" in title_text or "вайлдберриз" in title_text:
         return False
-    if ch_lower in SEED_LOWER:
-        return True
 
     full_header = f"{ch_lower} {title_text} {desc_text}"
     return any(kw in full_header for kw in CHANNEL_TOPIC_KEYWORDS)
@@ -263,23 +305,22 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 404:
-            log(f"Канал @{channel} не найден (404).")
-            if channel.lower() not in SEED_LOWER:
-                if channel in channels_pool:
-                    channels_pool.remove(channel)
-                reject_channel(channel)
+            log(f"Канал @{channel} не найден (404) — удаляю.")
+            if channel in channels_pool:
+                channels_pool.remove(channel)
+            reject_channel(channel)
             return []
         if resp.status_code != 200:
-            log(f"Канал @{channel}: HTTP {resp.status_code}, пропускаю на этот проход.")
+            set_channel_quarantine(channel, QUARANTINE_HTTP_ERR_SEC, f"HTTP {resp.status_code}")
             return []
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
         if not is_valid_target_channel(channel, soup):
             log(f"Канал @{channel} пустой или не по теме — в чёрный список.")
-            if channel in channels_pool and channel.lower() not in SEED_LOWER:
+            if channel in channels_pool:
                 channels_pool.remove(channel)
-                reject_channel(channel)
+            reject_channel(channel)
             return []
 
         for d_ch in re.findall(r"t\.me/(?:s/)?([a-zA-Z0-9_]{5,32})", resp.text):
@@ -300,6 +341,7 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
 
             base = {
                 "id": f"tg:{post_id}",
+                "channel": channel,
                 "txt_hash": make_text_hash(raw_text),
                 "raw_text": raw_text,
             }
@@ -316,12 +358,49 @@ def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> li
                     results.append({**base, "type": "photo", "media_url": bg.group(1)})
 
         log(f"@{channel}: кандидатов с медиа: {len(results)}")
+        if not results:
+            set_channel_quarantine(channel, QUARANTINE_NO_NEW_SEC, "0 подходящих постов с медиа")
     except Exception as e:
         log(f"Ошибка чтения @{channel}: {e}")
+        set_channel_quarantine(channel, QUARANTINE_HTTP_ERR_SEC, "ошибка соединения")
 
     return results
 
 
+def parse_mysku_reviews() -> list:
+    """Резервный источник: свежие обзоры товаров с mysku.club с фото."""
+    results = []
+    try:
+        resp = requests.get("https://mysku.club/", headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return []
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for topic in soup.select("article.topic, div.topic")[:12]:
+            title_el = topic.select_one("h2.topic-title a, .topic-title a")
+            body_el = topic.select_one(".topic-content")
+            img_el = topic.select_one(".topic-content img")
+            if not (title_el and body_el and img_el):
+                continue
+            href = title_el.get("href", "")
+            img_url = img_el.get("src") or img_el.get("data-src") or ""
+            if not href or not img_url.startswith("http"):
+                continue
+            raw_text = f"{title_el.get_text(' ', strip=True)}\n{body_el.get_text(' ', strip=True)[:500]}"
+            m_id = re.search(r"/(\d+)\.html", href)
+            item_id = f"mysku:{m_id.group(1)}" if m_id else f"mysku:{abs(hash(href))}"
+            results.append({
+                "id": item_id,
+                "channel": "mysku.club",
+                "txt_hash": make_text_hash(raw_text),
+                "raw_text": raw_text,
+                "type": "photo",
+                "media_url": img_url,
+            })
+        if results:
+            log(f"mysku.club: собрано свежих обзоров с фото: {len(results)}")
+    except Exception as e:
+        log(f"Ошибка чтения обзоров mysku.club: {e}")
+    return results
 def count_ai_call():
     today = datetime.now(MSK_TZ).strftime("%Y-%m-%d")
     if STATE.get("ai_day") != today:
@@ -411,6 +490,8 @@ def generate_batch_content(client, models: list, batch: list) -> dict:
             raise
 
     raise QuotaExhausted()
+
+
 def build_safe_caption(title: str, desc: str, search_query: str) -> str:
     raw_title = title.strip()
     raw_desc = desc.strip()
@@ -486,20 +567,34 @@ def prepare_next_post(client, models: list, history: list, channels_pool: list, 
                 save_and_push_state(history, channels_pool)
             return None
 
-        if len(channels_pool) < 8:
-            discover_channels_from_mysku(channels_pool)
-            for seed in INITIAL_SEED_CHANNELS:
-                if seed not in channels_pool:
-                    channels_pool.append(seed)
+        available_channels = [c for c in channels_pool if not is_channel_in_quarantine(c)]
 
-        selected = random.sample(channels_pool, min(6, len(channels_pool)))
-        log(f"Ищу пост по каналам ({len(channels_pool)} в базе): {selected}")
+        if len(available_channels) < 12 or empty_loops > 0:
+            discover_new_channels(channels_pool)
+            for seed in INITIAL_SEED_CHANNELS:
+                if seed not in channels_pool and seed.lower() not in [r.lower() for r in REJECTED]:
+                    channels_pool.append(seed)
+            available_channels = [c for c in channels_pool if not is_channel_in_quarantine(c)]
+
+        quarantined_cnt = len(channels_pool) - len(available_channels)
+        if not available_channels:
+            log(f"Все {len(channels_pool)} каналов временно в карантине — проверяю резерв mysku.club...")
+            selected = []
+        else:
+            selected = random.sample(available_channels, min(12, len(available_channels)))
+            log(f"Ищу пост по {len(selected)} свободным каналам (всего: {len(channels_pool)}, в карантине: {quarantined_cnt}): {selected}")
 
         video_posts, photo_posts = [], []
         seen_hashes = set()
 
         for ch in selected:
-            for p in reversed(parse_telegram_channel_and_discover(ch, channels_pool)):
+            raw_posts = parse_telegram_channel_and_discover(ch, channels_pool)
+            if not raw_posts:
+                time.sleep(0.5)
+                continue
+
+            new_from_ch = 0
+            for p in reversed(raw_posts):
                 if p["id"] in history:
                     continue
                 th = p.get("txt_hash")
@@ -510,7 +605,26 @@ def prepare_next_post(client, models: list, history: list, channels_pool: list, 
                 if th:
                     seen_hashes.add(th)
                 (video_posts if p["type"] == "video" else photo_posts).append(p)
-            time.sleep(1)
+                new_from_ch += 1
+
+            # Если в канале были посты, но ВСЕ они уже отработаны — отправляем канал в карантин на 3 часа
+            if new_from_ch == 0 and ch in channels_pool:
+                set_channel_quarantine(ch, QUARANTINE_NO_NEW_SEC, "все посты уже в истории")
+
+            time.sleep(0.6)
+
+        if not video_posts and not photo_posts:
+            for p in parse_mysku_reviews():
+                if p["id"] in history:
+                    continue
+                th = p.get("txt_hash")
+                if th and (th in history or th in seen_hashes):
+                    mark_item_seen(history, p)
+                    unsaved += 1
+                    continue
+                if th:
+                    seen_hashes.add(th)
+                photo_posts.append(p)
 
         candidates = video_posts + photo_posts
         log(f"Уникальных кандидатов: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
@@ -600,12 +714,12 @@ def prepare_next_post(client, models: list, history: list, channels_pool: list, 
                     if os.path.exists(ready_file):
                         os.remove(ready_file)
 
-        if unsaved >= 15:
+        if unsaved >= 10:
             save_and_push_state(history, channels_pool)
             unsaved = 0
 
         empty_loops += 1
-        pause_sec = min(120, 45 + empty_loops * 15)
+        pause_sec = min(30, 15 + empty_loops * 5)
         log(f"Подходящего поста в пачке нет — следующий поиск через {pause_sec} сек...")
         time.sleep(pause_sec)
 
@@ -632,7 +746,7 @@ def main():
     STATE = load_json(STATE_FILE, {"last_post_ts": 0.0, "ai_day": "", "ai_calls": 0})
 
     client, models = init_gemini_client_and_models()
-    log(f"Старт цикла 5.5 ч (батчинг x{BATCH_SIZE} + буфер). Интервал: {POST_INTERVAL_MINUTES} мин.")
+    log(f"Старт цикла 5.5 ч (батчинг x{BATCH_SIZE} + карантин каналов + буфер). Интервал: {POST_INTERVAL_MINUTES} мин.")
 
     prepared_post = None
 
@@ -681,4 +795,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
