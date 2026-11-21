@@ -411,7 +411,7 @@ def generate_batch_content(client, models: list, batch: list) -> dict:
             raise
 
     raise QuotaExhausted()
-    def build_safe_caption(title: str, desc: str, search_query: str) -> str:
+def build_safe_caption(title: str, desc: str, search_query: str) -> str:
     raw_title = title.strip()
     raw_desc = desc.strip()
     encoded_q = urllib.parse.quote(search_query.strip())
@@ -681,3 +681,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
