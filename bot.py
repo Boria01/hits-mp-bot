@@ -540,6 +540,11 @@ def main():
                 media_url = fetch_og_image(item["link"])
 
             caption = build_safe_caption(title, desc, search_query)
+            
+            now = datetime.now(MSK_TZ)
+            if now.second >= 25:
+              time.sleep(60 - now.second)
+    
             if send_telegram_photo_post(caption, media_url):
                 STATE["last_post_ts"] = time.time()
                 log(f"Успешно опубликован товар из [{item['source']}]: {title}")
