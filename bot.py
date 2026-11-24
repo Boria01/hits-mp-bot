@@ -542,9 +542,9 @@ def main():
             caption = build_safe_caption(title, desc, search_query)
             
             now = datetime.now(MSK_TZ)
-            if now.second >= 25:
-              time.sleep(60 - now.second)
-    
+            if now.minute in (29, 59):
+                time.sleep(60 - now.second)
+                
             if send_telegram_photo_post(caption, media_url):
                 STATE["last_post_ts"] = time.time()
                 log(f"Успешно опубликован товар из [{item['source']}]: {title}")
