@@ -3,20 +3,19 @@ name: AutoPost Hits MP
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 */6 * * *'
+    - cron: '*/30 * * * *'
 
 permissions:
   contents: write
-  actions: write
 
 concurrency:
-  group: hits-mp-autopost-loop
-  cancel-in-progress: false
+  group: hits-mp-autopost
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -31,24 +30,12 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run bot loop (5.5 hours)
+      - name: Run shop bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           PARTNER_SEARCH_TEMPLATE: ${{ secrets.PARTNER_SEARCH_TEMPLATE }}
-          POST_INTERVAL_MINUTES: "20"
         run: |
           python -u bot.py
-
-      - name: Trigger next 5.5h cycle
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl -s -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/autopost.yml/dispatches" \
-            -d '{"ref":"${{ github.ref_name }}"}'
-            
+          
