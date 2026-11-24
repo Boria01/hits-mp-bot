@@ -6,6 +6,7 @@ import time
 import random
 import subprocess
 import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
@@ -19,87 +20,55 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"].strip()
 
 ENV_GEMINI_MODELS = os.environ.get("GEMINI_MODELS", "").strip()
 PARTNER_SEARCH_TEMPLATE = os.environ.get("PARTNER_SEARCH_TEMPLATE", "").strip()
-POST_INTERVAL_MINUTES = int(os.environ.get("POST_INTERVAL_MINUTES", "20"))
 MAX_AI_CALLS_PER_DAY = int(os.environ.get("MAX_AI_CALLS_PER_DAY", "180"))
-MAX_RUNTIME_SECONDS = int(5.5 * 3600)
 
-BATCH_SIZE = 5
-MAX_AI_BATCH_CALLS_PER_CYCLE = 2
-MAX_ATTEMPTS_PER_POST = 3
-
-# --- НАСТРОЙКИ КАРАНТИНА КАНАЛОВ (В СЕКУНДАХ) ---
-QUARANTINE_NO_NEW_SEC = 3 * 3600       # 3 часа, если в канале все посты уже отработаны
-QUARANTINE_NO_PRODUCTS_SEC = 90 * 60   # 1.5 часа, если AI отсеял все посты канала
-QUARANTINE_HTTP_ERR_SEC = 30 * 60      # 30 минут при временной ошибке сети/429
+BATCH_SIZE = 6
+MAX_AI_BATCH_CALLS_PER_RUN = 3
+MAX_PHOTO_BYTES = 9 * 1024 * 1024
 
 HISTORY_FILE = "history.json"
-CHANNELS_POOL_FILE = "channels_pool.json"
-REJECTED_FILE = "rejected_channels.json"
 STATE_FILE = "state.json"
 MSK_TZ = timezone(timedelta(hours=3))
-
-MAX_VIDEO_BYTES = 48 * 1024 * 1024
-MAX_PHOTO_BYTES = 9 * 1024 * 1024
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-INITIAL_SEED_CHANNELS = [
-    "nahodki_aliexpress",
-    "aligadgets",
-    "ali_express_sale",
-    "aliexpress_top_ru",
-    "china_goods_top",
-    "ali_top_skidki",
-    "aliexpress_halava",
-    "aliskidki_top",
+# --- РАСШИРЕННЫЙ СПИСОК ИСТОЧНИКОВ (RSS + HTML) ---
+RSS_SOURCES = [
+    {"name": "mysku", "url": "https://mysku.club/rss/", "strict_kw": False},
+    {"name": "pepper", "url": "https://www.pepper.ru/rss/all", "strict_kw": False},
+    {"name": "ixbt_live", "url": "https://www.ixbt.com/live/rss/", "strict_kw": True},
+    {"name": "lifehacker_shop", "url": "https://lifehacker.ru/topics/shopping/feed/", "strict_kw": False},
+    {"name": "4pda", "url": "https://4pda.to/feed/", "strict_kw": True},
+    {"name": "rozetked", "url": "https://rozetked.me/rss", "strict_kw": True},
+    {"name": "trashbox", "url": "https://trashbox.ru/feed/", "strict_kw": True},
+    {"name": "ferra", "url": "https://www.ferra.ru/exports/rss.xml", "strict_kw": True},
+    {"name": "hitech_mail", "url": "https://hi-tech.mail.ru/rss/all/", "strict_kw": True},
+    {"name": "overclockers", "url": "https://overclockers.ru/rss/all.rss", "strict_kw": True},
 ]
 
-TLGRM_SEARCH_QUERIES = [
-    "aliexpress",
-    "алиэкспресс",
-    "находки",
-    "яндекс маркет",
-    "гаджеты",
-    "скидки",
-    "автотовары",
-]
-
-IGNORED_USERNAMES = {
-    "s", "joinchat", "share", "proxy", "iv", "addstickers", "setlanguage",
-    "botfather", "telegram", "durov", "username", "login", "contact",
-    "vcnews", "addlist", "tgstat", "telemetr", "tlgrm", "pikabu", "ixbt_official",
-}
-
-CHANNEL_TOPIC_KEYWORDS = (
+# Ключевые слова для новостных сайтов (чтобы отсеять обычные новости от подборок/скидок)
+NEWS_SITE_PRODUCT_KEYWORDS = (
     "aliexpress", "алиэкспресс", "яндекс маркет", "яндекс.маркет",
-    "гаджет", "техник", "электроник", "инструмент", "автотовар",
-    "находк", "распаковк", "китай", "скидк", "обзор", "товар", "покупк",
+    "скидк", "дешевле", "цена", "руб", "₽", "подборк", "находк",
+    "обзор", "гаджет", "аккумулятор", "зарядк", "наушник", "инструмент",
+    "автотовар", "пылесос", "смарт-час", "фонар", "мультитул", "купон", "промокод",
 )
 
 POST_STOP_WORDS = (
     "wildberries", "вайлдберриз", "артикул wb", "арт. wb", "арт wb",
     "на вб", "с вб", "артикул озон", "арт. озон", "готовый образ", "лук на",
     "казино", "ставки на спорт", "букмекер", "криптовалют", "заработок в интернете",
-    "подписывайся на наш", "розыгрыш среди подписчиков", "итоги конкурса",
-)
-
-POST_FILTER_KEYWORDS = (
-    "руб", "₽", "цена", "скидк", "$", "купить", "заказ",
-    "гаджет", "аккумулятор", "мощност", "обзор", "распаковк", "aliexpress", "алиэкспресс",
+    "итоги конкурса", "розыгрыш среди подписчиков",
 )
 
 MODEL_COOLDOWN = {}
-CHANNEL_QUARANTINE = {}
-ATTEMPTS = {}
 STATE = {"last_post_ts": 0.0, "ai_day": "", "ai_calls": 0}
-REJECTED = []
-_last_discovery_ts = 0.0
 
 
 class QuotaExhausted(Exception):
@@ -109,17 +78,6 @@ class QuotaExhausted(Exception):
 def log(msg: str):
     now_str = datetime.now(MSK_TZ).strftime("%H:%M:%S")
     print(f"[{now_str} МСК] {msg}", flush=True)
-
-
-def set_channel_quarantine(channel: str, seconds: int, reason: str = ""):
-    CHANNEL_QUARANTINE[channel.lower()] = time.time() + seconds
-    mins = max(1, seconds // 60)
-    suffix = f" ({reason})" if reason else ""
-    log(f"Канал @{channel} отправлен в карантин на {mins} мин.{suffix}")
-
-
-def is_channel_in_quarantine(channel: str) -> bool:
-    return CHANNEL_QUARANTINE.get(channel.lower(), 0) > time.time()
 
 
 def load_json(filepath: str, default):
@@ -136,27 +94,23 @@ def load_json(filepath: str, default):
     return default.copy()
 
 
-def save_and_push_state(history: list, channels_pool: list):
+def save_and_push_state(history: list):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history[-2500:], f, ensure_ascii=False, indent=2)
-    with open(CHANNELS_POOL_FILE, "w", encoding="utf-8") as f:
-        json.dump(channels_pool[-300:], f, ensure_ascii=False, indent=2)
-    with open(REJECTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(REJECTED[-1000:], f, ensure_ascii=False, indent=2)
+        json.dump(history[-3000:], f, ensure_ascii=False, indent=2)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(STATE, f, ensure_ascii=False, indent=2)
 
     try:
-        files = [HISTORY_FILE, CHANNELS_POOL_FILE, REJECTED_FILE, STATE_FILE]
+        files = [HISTORY_FILE, STATE_FILE]
         subprocess.run(["git", "config", "--local", "user.email", "github-actions[bot]@users.noreply.github.com"], check=False)
         subprocess.run(["git", "config", "--local", "user.name", "github-actions[bot]"], check=False)
         subprocess.run(["git", "add", *files], check=False)
         diff = subprocess.run(["git", "diff", "--staged", "--quiet"], check=False)
         if diff.returncode != 0:
-            subprocess.run(["git", "commit", "-m", "Update bot state"], check=False)
+            subprocess.run(["git", "commit", "-m", "Update shop bot state"], check=False)
             subprocess.run(["git", "pull", "--rebase", "-X", "ours"], check=False)
             subprocess.run(["git", "push"], check=False)
-            log(f"Состояние сохранено (история: {len(history)}, каналов: {len(channels_pool)}, ЧС: {len(REJECTED)}).")
+            log(f"Состояние сохранено в GitHub (в истории: {len(history)} записей).")
     except Exception as e:
         log(f"Ошибка синхронизации с GitHub: {e}")
 
@@ -197,79 +151,8 @@ def init_gemini_client_and_models():
         0 if "flash-lite" in x.lower() else (1 if "flash" in x.lower() else 2),
         x
     ))
-    log(f"Список моделей из API (0 квоты потрачено): {candidates}")
+    log(f"Доступные модели Gemini: {candidates}")
     return client, candidates
-
-
-def reject_channel(channel: str):
-    if channel.lower() not in [r.lower() for r in REJECTED]:
-        REJECTED.append(channel)
-
-
-def try_add_channel(ch: str, channels_pool: list, own_channel: str) -> bool:
-    ch_l = ch.lower()
-    if ch_l in IGNORED_USERNAMES or ch_l == own_channel or ch_l.endswith("bot"):
-        return False
-    if "wb" in ch_l or "wildberries" in ch_l or "news" in ch_l:
-        return False
-    if ch_l in [r.lower() for r in REJECTED]:
-        return False
-    if ch_l in [c.lower() for c in channels_pool]:
-        return False
-    channels_pool.append(ch)
-    return True
-
-
-def discover_new_channels(channels_pool: list):
-    """Ищет новые каналы по маркетплейсам на tlgrm.ru и mysku.club."""
-    global _last_discovery_ts
-    if time.time() - _last_discovery_ts < 300:
-        return
-    _last_discovery_ts = time.time()
-
-    own_channel = CHANNEL_ID.lstrip("@").lower()
-    added_total = 0
-
-    for q in random.sample(TLGRM_SEARCH_QUERIES, min(4, len(TLGRM_SEARCH_QUERIES))):
-        try:
-            url = f"https://tlgrm.ru/channels?q={urllib.parse.quote(q)}"
-            resp = requests.get(url, headers=HEADERS, timeout=15)
-            if resp.status_code == 200:
-                found = re.findall(r"/channels/@([a-zA-Z0-9_]{4,32})", resp.text)
-                added_total += sum(1 for ch in found if try_add_channel(ch, channels_pool, own_channel))
-            time.sleep(1)
-        except Exception as e:
-            log(f"Ошибка поиска каналов на tlgrm.ru ({q}): {e}")
-
-    try:
-        resp = requests.get("https://mysku.club/", headers=HEADERS, timeout=15)
-        if resp.status_code == 200:
-            found = re.findall(r"t\.me/([a-zA-Z0-9_]{5,32})", resp.text)
-            added_total += sum(1 for ch in found if try_add_channel(ch, channels_pool, own_channel))
-    except Exception as e:
-        log(f"Ошибка обхода mysku.club: {e}")
-
-    if added_total:
-        log(f"Найдено новых каналов-кандидатов: +{added_total} (всего в базе: {len(channels_pool)})")
-
-
-def is_valid_target_channel(channel_name: str, soup: BeautifulSoup) -> bool:
-    ch_lower = channel_name.lower()
-    if "wb" in ch_lower or "wildberries" in ch_lower:
-        return False
-
-    title_el = soup.select_one(".tgme_channel_info_header_title")
-    desc_el = soup.select_one(".tgme_channel_info_description")
-    title_text = title_el.get_text(" ", strip=True).lower() if title_el else ""
-    desc_text = desc_el.get_text(" ", strip=True).lower() if desc_el else ""
-
-    if not title_text:
-        return False
-    if "wildberries" in title_text or "вайлдберриз" in title_text:
-        return False
-
-    full_header = f"{ch_lower} {title_text} {desc_text}"
-    return any(kw in full_header for kw in CHANNEL_TOPIC_KEYWORDS)
 
 
 def clean_donor_text(text: str) -> str:
@@ -277,7 +160,7 @@ def clean_donor_text(text: str) -> str:
     text = re.sub(r"@\w+", "", text)
     text = re.sub(r"Реклама\..*?(erid:\s*\S+)?", "", text, flags=re.IGNORECASE)
     text = re.sub(r"erid:\s*\S+", "", text, flags=re.IGNORECASE)
-    return text.strip()
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def make_text_hash(raw_text: str) -> str:
@@ -286,89 +169,118 @@ def make_text_hash(raw_text: str) -> str:
     return f"txt:{norm}" if len(norm) >= 20 else ""
 
 
-def looks_like_target_post(text: str) -> bool:
-    t_lower = text.lower()
-    if len(t_lower) < 35 or len(t_lower) > 1800:
-        return False
-    if any(sw in t_lower for sw in POST_STOP_WORDS):
-        return False
-    has_digits = bool(re.search(r"\d{2,}", t_lower))
-    has_kw = any(k in t_lower for k in POST_FILTER_KEYWORDS)
-    return has_digits and has_kw
+def extract_first_image(soup: BeautifulSoup, base_url: str = "") -> str:
+    for img in soup.select("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+        if not src or src.startswith("data:"):
+            continue
+        if any(skip in src.lower() for skip in ("avatar", "icon", "logo", "emoji", "smile", "pixel", "1x1", "counter")):
+            continue
+        if base_url and src.startswith("/"):
+            src = urllib.parse.urljoin(base_url, src)
+        if src.startswith("http"):
+            return src
+    return ""
 
 
-def parse_telegram_channel_and_discover(channel: str, channels_pool: list) -> list:
-    url = f"https://t.me/s/{channel}"
-    own_channel = CHANNEL_ID.lstrip("@").lower()
+def fetch_og_image(page_url: str) -> str:
+    """Добирает главную картинку страницы через og:image, если её не было в RSS."""
+    try:
+        resp = requests.get(page_url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
+        og = soup.select_one('meta[property="og:image"], meta[name="twitter:image"]')
+        if og and og.get("content", "").startswith("http"):
+            return og["content"].strip()
+    except Exception:
+        pass
+    return ""
+def parse_rss_source(source: dict) -> list:
+    name = source["name"]
+    feed_url = source["url"]
+    strict_kw = source.get("strict_kw", True)
     results = []
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        if resp.status_code == 404:
-            log(f"Канал @{channel} не найден (404) — удаляю.")
-            if channel in channels_pool:
-                channels_pool.remove(channel)
-            reject_channel(channel)
-            return []
+        resp = requests.get(feed_url, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
-            set_channel_quarantine(channel, QUARANTINE_HTTP_ERR_SEC, f"HTTP {resp.status_code}")
+            log(f"[{name}] HTTP {resp.status_code} — пропускаю.")
             return []
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        root = ET.fromstring(resp.content)
+        items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
 
-        if not is_valid_target_channel(channel, soup):
-            log(f"Канал @{channel} пустой или не по теме — в чёрный список.")
-            if channel in channels_pool:
-                channels_pool.remove(channel)
-            reject_channel(channel)
-            return []
+        for item in items[:15]:
+            title_el = item.find("title")
+            if title_el is None:
+                title_el = item.find("{http://www.w3.org/2005/Atom}title")
+            title = (title_el.text or "").strip() if title_el is not None else ""
 
-        for d_ch in re.findall(r"t\.me/(?:s/)?([a-zA-Z0-9_]{5,32})", resp.text):
-            try_add_channel(d_ch, channels_pool, own_channel)
+            link = ""
+            link_el = item.find("link")
+            if link_el is not None:
+                link = (link_el.text or link_el.get("href") or "").strip()
+            if not link:
+                atom_link = item.find("{http://www.w3.org/2005/Atom}link")
+                if atom_link is not None:
+                    link = (atom_link.get("href") or "").strip()
 
-        for msg in soup.select(".tgme_widget_message_wrap"):
-            msg_div = msg.select_one(".tgme_widget_message")
-            if not msg_div:
+            desc_html = ""
+            for tag in ("description", "content:encoded", "{http://purl.org/rss/1.0/modules/content/}encoded",
+                        "{http://www.w3.org/2005/Atom}summary", "{http://www.w3.org/2005/Atom}content"):
+                el = item.find(tag)
+                if el is not None and el.text:
+                    desc_html = el.text
+                    break
+
+            soup = BeautifulSoup(desc_html, "html.parser")
+            desc_text = soup.get_text(" ", strip=True)
+            full_text = f"{title}\n{desc_text}".strip()
+            lower_full = full_text.lower()
+
+            if len(lower_full) < 30:
                 continue
-            post_id = msg_div.get("data-post")
-            if not post_id:
+            if any(sw in lower_full for sw in POST_STOP_WORDS):
+                continue
+            if strict_kw and not any(kw in lower_full for kw in NEWS_SITE_PRODUCT_KEYWORDS):
                 continue
 
-            text_div = msg.select_one(".tgme_widget_message_text")
-            raw_text = text_div.get_text("\n").strip() if text_div else ""
-            if not looks_like_target_post(raw_text):
-                continue
+            # Ищем картинку в enclosure / media:content / внутри HTML описания
+            img_url = ""
+            enclosure = item.find("enclosure")
+            if enclosure is not None and "image" in (enclosure.get("type") or "image"):
+                img_url = (enclosure.get("url") or "").strip()
 
-            base = {
-                "id": f"tg:{post_id}",
-                "channel": channel,
-                "txt_hash": make_text_hash(raw_text),
-                "raw_text": raw_text,
-            }
+            if not img_url:
+                for m_tag in ("{http://search.yahoo.com/mrss/}content", "{http://search.yahoo.com/mrss/}thumbnail"):
+                    m_el = item.find(m_tag)
+                    if m_el is not None and m_el.get("url"):
+                        img_url = m_el.get("url").strip()
+                        break
 
-            video_tag = msg.select_one("video.tgme_widget_message_video")
-            if video_tag and video_tag.get("src"):
-                results.append({**base, "type": "video", "media_url": video_tag["src"]})
-                continue
+            if not img_url:
+                img_url = extract_first_image(soup, link)
 
-            photo_wrap = msg.select_one("a.tgme_widget_message_photo_wrap")
-            if photo_wrap and photo_wrap.get("style"):
-                bg = re.search(r"url\(['\"]?(https?://[^'\")]+)['\"]?\)", photo_wrap["style"])
-                if bg:
-                    results.append({**base, "type": "photo", "media_url": bg.group(1)})
+            item_uid = f"{name}:{abs(hash(link or title))}"
+            results.append({
+                "id": item_uid,
+                "source": name,
+                "link": link,
+                "txt_hash": make_text_hash(full_text),
+                "raw_text": full_text[:900],
+                "media_url": img_url,
+            })
 
-        log(f"@{channel}: кандидатов с медиа: {len(results)}")
-        if not results:
-            set_channel_quarantine(channel, QUARANTINE_NO_NEW_SEC, "0 подходящих постов с медиа")
+        log(f"[{name}] отобрано кандидатов: {len(results)}")
     except Exception as e:
-        log(f"Ошибка чтения @{channel}: {e}")
-        set_channel_quarantine(channel, QUARANTINE_HTTP_ERR_SEC, "ошибка соединения")
+        log(f"[{name}] ошибка парсинга RSS: {e}")
 
     return results
 
 
-def parse_mysku_reviews() -> list:
-    """Резервный источник: свежие обзоры товаров с mysku.club с фото."""
+def parse_mysku_html_fallback() -> list:
+    """Дополнительный парсер главной страницы mysku.club на случай задержек в RSS."""
     results = []
     try:
         resp = requests.get("https://mysku.club/", headers=HEADERS, timeout=15)
@@ -379,28 +291,28 @@ def parse_mysku_reviews() -> list:
             title_el = topic.select_one("h2.topic-title a, .topic-title a")
             body_el = topic.select_one(".topic-content")
             img_el = topic.select_one(".topic-content img")
-            if not (title_el and body_el and img_el):
+            if not (title_el and body_el):
                 continue
             href = title_el.get("href", "")
-            img_url = img_el.get("src") or img_el.get("data-src") or ""
-            if not href or not img_url.startswith("http"):
+            img_url = (img_el.get("src") or img_el.get("data-src") or "") if img_el else ""
+            raw_text = f"{title_el.get_text(' ', strip=True)}\n{body_el.get_text(' ', strip=True)[:600]}"
+            if any(sw in raw_text.lower() for sw in POST_STOP_WORDS):
                 continue
-            raw_text = f"{title_el.get_text(' ', strip=True)}\n{body_el.get_text(' ', strip=True)[:500]}"
             m_id = re.search(r"/(\d+)\.html", href)
-            item_id = f"mysku:{m_id.group(1)}" if m_id else f"mysku:{abs(hash(href))}"
+            item_id = f"mysku_html:{m_id.group(1)}" if m_id else f"mysku_html:{abs(hash(href))}"
             results.append({
                 "id": item_id,
-                "channel": "mysku.club",
+                "source": "mysku_html",
+                "link": href,
                 "txt_hash": make_text_hash(raw_text),
                 "raw_text": raw_text,
-                "type": "photo",
-                "media_url": img_url,
+                "media_url": img_url if img_url.startswith("http") else "",
             })
-        if results:
-            log(f"mysku.club: собрано свежих обзоров с фото: {len(results)}")
     except Exception as e:
-        log(f"Ошибка чтения обзоров mysku.club: {e}")
+        log(f"[mysku_html] ошибка: {e}")
     return results
+
+
 def count_ai_call():
     today = datetime.now(MSK_TZ).strftime("%Y-%m-%d")
     if STATE.get("ai_day") != today:
@@ -424,28 +336,28 @@ def generate_batch_content(client, models: list, batch: list) -> dict:
     current_date = datetime.now(MSK_TZ).strftime("%d.%m.%Y")
     items_block = []
     for idx, item in enumerate(batch, start=1):
-        cleaned = clean_donor_text(item["raw_text"])[:700]
+        cleaned = clean_donor_text(item["raw_text"])[:750]
         items_block.append(f'IDX: {idx}\nТЕКСТ:\n"""{cleaned}"""')
     joined_items = "\n\n---\n\n".join(items_block)
 
     prompt = f"""
 Ты — автор популярного Telegram-канала «Лучшие находки с маркетплейсов» (упор на AliExpress и Яндекс Маркет).
-Сегодняшняя дата: {current_date} (учитывай текущий сезон, не пиши про весну/лето, если сейчас осень/зима).
+Сегодняшняя дата: {current_date} (учитывай текущий сезон).
 
-Проанализируй каждый пост (по его числовому IDX) и верни строго JSON-массив объектов (без markdown-обёртки).
+Проанализируй каждый материал (по его числовому IDX) и верни строго JSON-массив объектов (без markdown-обёртки).
 Для каждого IDX:
-- Если это НЕ физический товар (новость, мем, реклама канала, бота, казино, ставок, курсов, кредитов, подписки), подборка/коллаж из нескольких разных вещей одежды (женский образ/лук) или товар строго с Wildberries/Ozon — верни:
+- Если это НЕ физический товар (просто новость индустрии, анонс фильма/игры, слухи, реклама казино/ставок/курсов/подписок) или товар строго с Wildberries/Ozon — верни:
   {{"idx": 1, "is_product": false}}
-- Если это ОДИН конкретный крутой товар (гаджет, электроника, инструмент, автотовар, полезная вещь для дома/кухни) — верни:
+- Если это ОДИН конкретный реальный товар (гаджет, электроника, инструмент, автотовар, вещь для дома/кухни/туризма) — верни:
   {{
     "idx": 1,
     "is_product": true,
     "title": "Короткий цепляющий заголовок с 1 подходящим эмодзи в начале (без HTML-тегов)",
-    "description": "Живое описание пользы товара (2-3 предложения) + 3-4 коротких буллита (• ...) с главными фишками. Без HTML-тегов, без воды, без упоминаний WB/Ozon, без чужих каналов, ссылок и erid.",
+    "description": "Живое описание пользы товара (2-3 предложения) + 3-4 коротких буллита (• ...) с главными фишками и ценой/скидкой, если указана. Без HTML-тегов, без воды, без упоминаний WB/Ozon, без чужих сайтов и ссылок.",
     "search_query": "Точное название товара для поиска на AliExpress и Яндекс Маркете (4-7 слов)"
   }}
 
-Посты для проверки:
+Материалы для проверки:
 {joined_items}
 """
     now = time.time()
@@ -472,19 +384,18 @@ def generate_batch_content(client, models: list, batch: list) -> dict:
                     except (ValueError, TypeError):
                         pass
 
-            log(f"Батч из {len(batch)} постов обработан через {m} (ответов: {len(result_by_idx)}, вызов #{STATE['ai_calls']}/{MAX_AI_CALLS_PER_DAY})")
+            log(f"Батч из {len(batch)} шт. обработан через {m} (ответов: {len(result_by_idx)}, вызов #{STATE['ai_calls']}/{MAX_AI_CALLS_PER_DAY})")
             return result_by_idx
         except json.JSONDecodeError:
-            log(f"Модель {m} вернула невалидный JSON — посты остаются на повтор.")
+            log(f"Модель {m} вернула невалидный JSON.")
             return {}
         except Exception as e:
             s = str(e)
             if "404" in s:
-                log(f"Модель {m} не существует (404) — убираю из списка.")
                 models.remove(m)
                 continue
             if any(code in s for code in ("429", "RESOURCE_EXHAUSTED", "503", "504", "DEADLINE_EXCEEDED")):
-                log(f"Модель {m} недоступна/таймаут — кулдаун 15 мин.")
+                log(f"Модель {m} временно недоступна — кулдаун 15 мин.")
                 MODEL_COOLDOWN[m] = time.time() + 15 * 60
                 continue
             raise
@@ -517,282 +428,130 @@ def build_safe_caption(title: str, desc: str, search_query: str) -> str:
     return f"<b>{safe_title}</b>\n\n{html.escape(raw_desc)}\n\n{footer}"
 
 
-def download_media(url: str, path: str, media_type: str):
-    limit = MAX_VIDEO_BYTES if media_type == "video" else MAX_PHOTO_BYTES
-    with requests.get(url, headers=HEADERS, timeout=40, stream=True) as r:
-        r.raise_for_status()
-        size = int(r.headers.get("Content-Length") or 0)
-        if size > limit:
-            raise RuntimeError(f"Файл слишком большой ({size // 1024 // 1024} МБ)")
-        written = 0
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=64 * 1024):
-                written += len(chunk)
-                if written > limit:
-                    raise RuntimeError("Файл превысил лимит при скачивании")
-                f.write(chunk)
-
-
-def send_media_to_telegram(media_type: str, media_path: str, caption: str):
-    endpoint = "sendVideo" if media_type == "video" else "sendPhoto"
-    field_name = "video" if media_type == "video" else "photo"
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{endpoint}"
-
-    with open(media_path, "rb") as mf:
-        data = {"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"}
-        if media_type == "video":
-            data["supports_streaming"] = True
-        resp = requests.post(url, data=data, files={field_name: mf}, timeout=90)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Telegram HTTP {resp.status_code}: {resp.text[:300]}")
-        res_json = resp.json()
-        if not res_json.get("ok"):
-            raise RuntimeError(f"Ошибка Telegram API: {res_json}")
-
-
-def mark_item_seen(history: list, item: dict):
-    if item["id"] not in history:
-        history.append(item["id"])
-    if item.get("txt_hash") and item["txt_hash"] not in history:
-        history.append(item["txt_hash"])
-
-
-def prepare_next_post(client, models: list, history: list, channels_pool: list, start_time: float):
-    unsaved = 0
-    empty_loops = 0
-
-    while True:
-        if MAX_RUNTIME_SECONDS - (time.time() - start_time) <= 90:
-            if unsaved:
-                save_and_push_state(history, channels_pool)
-            return None
-
-        available_channels = [c for c in channels_pool if not is_channel_in_quarantine(c)]
-
-        if len(available_channels) < 12 or empty_loops > 0:
-            discover_new_channels(channels_pool)
-            for seed in INITIAL_SEED_CHANNELS:
-                if seed not in channels_pool and seed.lower() not in [r.lower() for r in REJECTED]:
-                    channels_pool.append(seed)
-            available_channels = [c for c in channels_pool if not is_channel_in_quarantine(c)]
-
-        quarantined_cnt = len(channels_pool) - len(available_channels)
-        if not available_channels:
-            log(f"Все {len(channels_pool)} каналов временно в карантине — проверяю резерв mysku.club...")
-            selected = []
-        else:
-            selected = random.sample(available_channels, min(12, len(available_channels)))
-            log(f"Ищу пост по {len(selected)} свободным каналам (всего: {len(channels_pool)}, в карантине: {quarantined_cnt}): {selected}")
-
-        video_posts, photo_posts = [], []
-        seen_hashes = set()
-
-        for ch in selected:
-            raw_posts = parse_telegram_channel_and_discover(ch, channels_pool)
-            if not raw_posts:
-                time.sleep(0.5)
-                continue
-
-            new_from_ch = 0
-            for p in reversed(raw_posts):
-                if p["id"] in history:
-                    continue
-                th = p.get("txt_hash")
-                if th and (th in history or th in seen_hashes):
-                    mark_item_seen(history, p)
-                    unsaved += 1
-                    continue
-                if th:
-                    seen_hashes.add(th)
-                (video_posts if p["type"] == "video" else photo_posts).append(p)
-                new_from_ch += 1
-
-            # Если в канале были посты, но ВСЕ они уже отработаны — отправляем канал в карантин на 3 часа
-            if new_from_ch == 0 and ch in channels_pool:
-                set_channel_quarantine(ch, QUARANTINE_NO_NEW_SEC, "все посты уже в истории")
-
-            time.sleep(0.6)
-
-        if not video_posts and not photo_posts:
-            for p in parse_mysku_reviews():
-                if p["id"] in history:
-                    continue
-                th = p.get("txt_hash")
-                if th and (th in history or th in seen_hashes):
-                    mark_item_seen(history, p)
-                    unsaved += 1
-                    continue
-                if th:
-                    seen_hashes.add(th)
-                photo_posts.append(p)
-
-        candidates = video_posts + photo_posts
-        log(f"Уникальных кандидатов: {len(candidates)} (видео: {len(video_posts)}, фото: {len(photo_posts)})")
-
-        batch_calls = 0
-        for i in range(0, len(candidates), BATCH_SIZE):
-            if batch_calls >= MAX_AI_BATCH_CALLS_PER_CYCLE:
-                log(f"Лимит {MAX_AI_BATCH_CALLS_PER_CYCLE} батч-запросов за проход.")
-                break
-
-            batch = [c for c in candidates[i: i + BATCH_SIZE] if c["id"] not in history]
-            if not batch:
-                continue
-
-            batch_calls += 1
-            for c in batch:
-                ATTEMPTS[c["id"]] = ATTEMPTS.get(c["id"], 0) + 1
-
-            try:
-                results = generate_batch_content(client, models, batch)
-            except QuotaExhausted:
-                log("AI недоступен (кулдаун/суточный лимит) — пауза 15 мин.")
-                for c in batch:
-                    ATTEMPTS[c["id"]] = max(0, ATTEMPTS[c["id"]] - 1)
-                if unsaved:
-                    save_and_push_state(history, channels_pool)
-                    unsaved = 0
-                time.sleep(min(15 * 60, max(60, MAX_RUNTIME_SECONDS - (time.time() - start_time) - 60)))
-                break
-            except Exception as e:
-                log(f"Ошибка AI на батче: {e}")
-                for c in batch:
-                    if ATTEMPTS[c["id"]] >= MAX_ATTEMPTS_PER_POST:
-                        mark_item_seen(history, c)
-                        unsaved += 1
-                continue
-
-            if not results:
-                for c in batch:
-                    if ATTEMPTS[c["id"]] >= MAX_ATTEMPTS_PER_POST:
-                        mark_item_seen(history, c)
-                        unsaved += 1
-                continue
-
-            for idx, item in enumerate(batch, start=1):
-                ai_data = results.get(idx)
-                if ai_data is None:
-                    if ATTEMPTS[item["id"]] >= MAX_ATTEMPTS_PER_POST:
-                        mark_item_seen(history, item)
-                        unsaved += 1
-                    continue
-
-                if not ai_data.get("is_product"):
-                    log(f"Пост {item['id']} отсеян AI (не одиночный товар / WB / реклама).")
-                    mark_item_seen(history, item)
-                    unsaved += 1
-                    continue
-
-                title = str(ai_data.get("title", "")).strip()
-                desc = str(ai_data.get("description", "")).strip()
-                search_query = str(ai_data.get("search_query", title)).strip()
-                if not title or not desc:
-                    mark_item_seen(history, item)
-                    unsaved += 1
-                    continue
-
-                caption = build_safe_caption(title, desc, search_query)
-                ext = ".mp4" if item["type"] == "video" else ".jpg"
-                ready_file = f"prepared_media{ext}"
-
-                try:
-                    download_media(item["media_url"], ready_file, item["type"])
-                    mark_item_seen(history, item)
-                    save_and_push_state(history, channels_pool)
-                    log(f"БУФЕР ГОТОВ: [{item['id']}] «{title}» ждёт момента публикации.")
-                    return {
-                        "id": item["id"],
-                        "type": item["type"],
-                        "file": ready_file,
-                        "caption": caption,
-                        "title": title,
-                    }
-                except Exception as e:
-                    log(f"Ошибка скачивания медиа для {item['id']}: {e}")
-                    mark_item_seen(history, item)
-                    unsaved += 1
-                    if os.path.exists(ready_file):
-                        os.remove(ready_file)
-
-        if unsaved >= 10:
-            save_and_push_state(history, channels_pool)
-            unsaved = 0
-
-        empty_loops += 1
-        pause_sec = min(30, 15 + empty_loops * 5)
-        log(f"Подходящего поста в пачке нет — следующий поиск через {pause_sec} сек...")
-        time.sleep(pause_sec)
-
-
-def publish_prepared_post(prepared: dict, history: list, channels_pool: list):
+def send_telegram_photo_post(caption: str, media_url: str) -> bool:
+    api_base = f"https://api.telegram.org/bot{BOT_TOKEN}"
     try:
-        send_media_to_telegram(prepared["type"], prepared["file"], prepared["caption"])
-        STATE["last_post_ts"] = time.time()
-        save_and_push_state(history, channels_pool)
-        log(f"ОПУБЛИКОВАНО В КАНАЛ БЕЗ ЗАДЕРЖКИ: {prepared['id']} -> {prepared['title']}")
+        if media_url:
+            img_resp = requests.get(media_url, headers=HEADERS, timeout=15)
+            if img_resp.status_code == 200 and 2000 < len(img_resp.content) <= MAX_PHOTO_BYTES:
+                ctype = img_resp.headers.get("Content-Type", "")
+                if "image" in ctype or media_url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    r = requests.post(
+                        f"{api_base}/sendPhoto",
+                        data={"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"},
+                        files={"photo": ("product.jpg", img_resp.content, "image/jpeg")},
+                        timeout=25,
+                    )
+                    if r.status_code == 200 and r.json().get("ok"):
+                        return True
+                    log(f"Ошибка sendPhoto: {r.text[:200]}")
+
+        # Резервная отправка текстом, если картинка не скачалась
+        r = requests.post(
+            f"{api_base}/sendMessage",
+            data={
+                "chat_id": CHANNEL_ID,
+                "text": caption,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False,
+            },
+            timeout=20,
+        )
+        if r.status_code == 200 and r.json().get("ok"):
+            return True
+        log(f"Ошибка sendMessage: {r.text[:200]}")
     except Exception as e:
-        log(f"Ошибка публикации подготовленного поста {prepared['id']}: {e}")
-    finally:
-        if os.path.exists(prepared["file"]):
-            os.remove(prepared["file"])
+        log(f"Ошибка отправки в Telegram: {e}")
+    return False
 
 
 def main():
-    global STATE, REJECTED
-    start_time = time.time()
+    global STATE
     history = load_json(HISTORY_FILE, [])
-    channels_pool = load_json(CHANNELS_POOL_FILE, INITIAL_SEED_CHANNELS)
-    REJECTED = load_json(REJECTED_FILE, [])
+    history_set = set(history)
     STATE = load_json(STATE_FILE, {"last_post_ts": 0.0, "ai_day": "", "ai_calls": 0})
 
-    client, models = init_gemini_client_and_models()
-    log(f"Старт цикла 5.5 ч (батчинг x{BATCH_SIZE} + карантин каналов + буфер). Интервал: {POST_INTERVAL_MINUTES} мин.")
+    log("Запуск разового цикла парсинга по cron...")
+    sources = list(RSS_SOURCES)
+    random.shuffle(sources)
 
-    prepared_post = None
-
-    while True:
-        elapsed = time.time() - start_time
-        if elapsed >= MAX_RUNTIME_SECONDS:
-            if prepared_post is not None:
-                log("Сессия завершается — публикуем оставшийся пост из буфера перед выходом.")
-                publish_prepared_post(prepared_post, history, channels_pool)
-            log("Прошло 5.5 часов. Завершаю сессию для перезапуска.")
+    candidates = []
+    for src in sources:
+        items = parse_rss_source(src)
+        for it in items:
+            if it["id"] in history_set or (it["txt_hash"] and it["txt_hash"] in history_set):
+                continue
+            candidates.append(it)
+        if len(candidates) >= 24:
             break
 
-        if prepared_post is None:
-            prepared_post = prepare_next_post(client, models, history, channels_pool, start_time)
-            if prepared_post is None:
+    if len(candidates) < 6:
+        for it in parse_mysku_html_fallback():
+            if it["id"] not in history_set and (not it["txt_hash"] or it["txt_hash"] not in history_set):
+                candidates.append(it)
+
+    if not candidates:
+        log("Новых непроверенных материалов на сайтах пока нет. Завершаю работу.")
+        save_and_push_state(history)
+        return
+
+    random.shuffle(candidates)
+    client, models = init_gemini_client_and_models()
+
+    published = False
+    ai_calls_this_run = 0
+
+    for i in range(0, len(candidates), BATCH_SIZE):
+        if published or ai_calls_this_run >= MAX_AI_BATCH_CALLS_PER_RUN:
+            break
+
+        batch = candidates[i:i + BATCH_SIZE]
+        ai_calls_this_run += 1
+
+        try:
+            ai_results = generate_batch_content(client, models, batch)
+        except QuotaExhausted:
+            log("Квота Gemini исчерпана — выхожу до следующего запуска.")
+            break
+
+        for idx, item in enumerate(batch, start=1):
+            res = ai_results.get(idx)
+            if not res:
+                continue
+
+            # Запоминаем просмотренный материал, чтобы не гонять его повторно
+            history.append(item["id"])
+            history_set.add(item["id"])
+            if item["txt_hash"]:
+                history.append(item["txt_hash"])
+                history_set.add(item["txt_hash"])
+
+            if not res.get("is_product"):
+                continue
+
+            title = (res.get("title") or "").strip()
+            desc = (res.get("description") or "").strip()
+            search_query = (res.get("search_query") or "").strip()
+            if not (title and desc and search_query):
+                continue
+
+            media_url = item.get("media_url") or ""
+            if not media_url and item.get("link"):
+                media_url = fetch_og_image(item["link"])
+
+            caption = build_safe_caption(title, desc, search_query)
+            if send_telegram_photo_post(caption, media_url):
+                STATE["last_post_ts"] = time.time()
+                log(f"Успешно опубликован товар из [{item['source']}]: {title}")
+                published = True
                 break
 
-        since_last = time.time() - float(STATE.get("last_post_ts", 0.0))
-        min_gap = POST_INTERVAL_MINUTES * 60
-        if since_last < min_gap:
-            wait_before_pub = min(min_gap - since_last, MAX_RUNTIME_SECONDS - (time.time() - start_time) - 60)
-            if wait_before_pub > 5:
-                log(f"Пост готов в буфере, жду {int(wait_before_pub // 60)} мин. {int(wait_before_pub % 60)} сек. по расписанию...")
-                time.sleep(wait_before_pub)
+    if not published:
+        log("В этом запуске подходящих новых товаров не нашлось — засыпаю до следующего крона.")
 
-        publish_prepared_post(prepared_post, history, channels_pool)
-        prepared_post = None
-
-        prep_start = time.time()
-        prepared_post = prepare_next_post(client, models, history, channels_pool, start_time)
-        prep_took = int(time.time() - prep_start)
-
-        remaining = MAX_RUNTIME_SECONDS - (time.time() - start_time)
-        if remaining <= 60:
-            if prepared_post is not None:
-                log("Время сессии истекает — публикуем буфер перед передачей эстафеты.")
-                publish_prepared_post(prepared_post, history, channels_pool)
-            log("Выхожу для передачи эстафеты.")
-            break
-
-        wait_seconds = max(10, POST_INTERVAL_MINUTES * 60 - prep_took)
-        sleep_duration = min(wait_seconds, remaining)
-        log(f"Следующий пост уже заряжен в буфере! Сплю {int(sleep_duration // 60)} мин. {int(sleep_duration % 60)} сек. до выхода...")
-        time.sleep(sleep_duration)
+    save_and_push_state(history)
 
 
 if __name__ == "__main__":
     main()
-        
+    
